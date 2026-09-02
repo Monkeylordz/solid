@@ -1,5 +1,22 @@
 # solid-js
 
+## 2.0.0-rc.6
+
+### Patch Changes
+
+- 3e48a75: Dev console footer: perf/graph diagnostic codes now also point at the attribution surface (`DEV.attribution.enable()` — why-chains, `costs()`, `waterfalls()`) and the agent-loops skill. Breaks a discovery circularity: the sensitive perf detectors only fire while attribution is enabled, so the always-on graph warnings are the moment to teach that the deeper evidence channel exists.
+- Updated dependencies [e13ca05]
+- Updated dependencies [432b089]
+- Updated dependencies [aa03f76]
+- Updated dependencies [fb5061c]
+- Updated dependencies [6b743c6]
+- Updated dependencies [1012859]
+- Updated dependencies [71acf62]
+- Updated dependencies [3e36d6d]
+- Updated dependencies [202ee53]
+- Updated dependencies [e767ebd]
+  - @solidjs/signals@2.0.0-rc.6
+
 ## 2.0.0-rc.5
 
 ### Patch Changes
