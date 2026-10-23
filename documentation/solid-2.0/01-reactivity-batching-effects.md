@@ -105,6 +105,23 @@ flush(() => {
 
 Use `flush(fn)` at imperative boundaries where the writes themselves should run in a synchronous flush scope. Writes inside the callback do not schedule the normal microtask flush; they are drained before `flush(fn)` returns, so you can update state and immediately read reactive values or DOM without leaving a queued flush behind. The callback's return value is preserved, and nested `flush(fn)` calls drain at each level.
 
+### `independent`: a separate update group
+
+`independent(fn: () => void): void` runs its callback immediately. Synchronous writes in the callback form their own atomic group, separate from ordinary writes in the surrounding batch. They still batch until the normal microtask flush and use the same dependency queue and effect phases.
+
+```js
+function selectItem(item) {
+  independent(() => setMenuOpen(false));
+  props.onSelect(item); // may trigger async data loading
+}
+```
+
+The menu can close at the normal flush while the selection waits for data. Reversing these two calls preserves that separation when their reactive graphs do not overlap. `independent` does not flush the global queue or change ownership, dependency tracking, or write guards.
+
+All writes in one invocation commit together: async work triggered by any of them can hold the whole group. Use separate invocations for updates that should also be independent of each other. Shared derivations and writes to an already held signal can merge groups; sharing a render effect alone does not merge them. A shared render effect reads committed foreign values and catches up when those groups commit. Store writes sharing one pending backing also share its commitment.
+
+Nested invocations start separate groups and restore the outer group on return. The scope ends at synchronous return, so writes after an `await` are outside it. A thrown callback preserves writes already made and restores the previous group. On the server, the callback executes synchronously.
+
 ### Split tracking from effect
 
 Effects have two phases: **compute** (reactive reads only; dependencies recorded) and **effect** (side effects; runs after all compute phases in the batch). This gives a clear dependency picture before any side effects run and is required for async and boundaries.

@@ -2,6 +2,7 @@ export {
   $PROXY,
   $TRACK,
   action,
+  independent,
   affects,
   createOwner,
   createReaction,

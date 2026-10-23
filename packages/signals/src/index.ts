@@ -125,3 +125,5 @@ export { from, type FromSource } from "./from.js";
 export { flatten } from "./flatten.js";
 export { createLoadingBoundary, createErrorBoundary } from "./boundaries.js";
 export { createRevealOrder, type RevealOrder } from "./reveal.js";
+
+export { independent } from "./independent.js";

@@ -7,6 +7,7 @@ export {
   $PROXY,
   $TRACK,
   action,
+  independent,
   affects,
   createEffect,
   createMemo,

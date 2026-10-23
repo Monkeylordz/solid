@@ -95,7 +95,8 @@ import {
   resolveTx,
   txOf,
   type Transaction,
-  installStoreHooks
+  installStoreHooks,
+  independentHooks
 } from "../core/scheduler.js";
 import type { Computed, Owner, Signal } from "../core/types.js";
 import {
@@ -477,6 +478,7 @@ export function getContainerNode(target: StoreTarget): Signal<any> {
 function stageOn(target: StoreTarget, pb: Record<PropertyKey, any>): void {
   if (
     target.k === null &&
+    !independentHooks?.active &&
     passLane === null &&
     (context === null || globalQueue._running) &&
     !deriveHolds(target)
@@ -1129,6 +1131,10 @@ function heldDerivation(t: StoreTarget, node: Signal<any> | undefined, key: Prop
 function notifyWrites(t: StoreTarget): void {
   let pb = t.pb;
   if (pb === null) return;
+  // A pending backing is one commit slot. Group it even when none of its
+  // changed keys has a leaf; later leaf creation inherits the same backing.
+  if (independentHooks?.active && t.k !== null && !(t.k._config & CONFIG_HELD))
+    independentHooks.write(t.k, true);
   // Optimistic channel: a user's writes on an optimistic family become
   // guesses on the nodes (lanes); the draft is discarded, the committed
   // backing never touched.
