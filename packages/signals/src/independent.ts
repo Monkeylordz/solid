@@ -5,6 +5,7 @@ import {
   CONFIG_OVERRIDE,
   CONFIG_VERDICT,
   EFFECT_RENDER,
+  NewSet,
   NOT_PENDING,
   REACTIVE_JOINED,
   STATUS_PENDING,
@@ -20,7 +21,7 @@ import {
   liveTx,
   merge,
   newTransaction,
-  parkNodes,
+  parkNode,
   passLane,
   resolveTx,
   schedule,
@@ -44,14 +45,17 @@ let ambient: Transaction | null = null;
 // The optional wrapper re-enters the original core function once. Consume
 // this bypass at entry so nested pulls still establish their own context.
 let bypass = false;
-const proposals = new WeakMap<Signal<any>, Transaction | null>();
-const causes = new WeakMap<Computed<any>, Seat>();
-let guesses = new WeakMap<Signal<any>, Transaction | null>();
-let trims = new WeakMap<Computed<any>, Seat>();
-const replays = new WeakMap<Computed<any>, Set<Transaction>>();
-const independentGroups = new Set<Transaction>();
+// A constructor binding avoids repeated retained PURE annotations. Only
+// guess ownership can disappear while the grouping engine itself is kept.
+const Ownership = WeakMap;
+const proposals = new Ownership<Signal<any>, Transaction | null>();
+const causes = new Ownership<Computed<any>, Seat>();
+let guesses = /*@__PURE__*/ new Ownership<Signal<any>, Transaction | null>();
+let trims = new Ownership<Computed<any>, Seat>();
+const replays = new Ownership<Computed<any>, Transaction[]>();
+const independentGroups = new NewSet<Transaction>();
 
-function transaction(seat: Seat): Transaction | null {
+function transaction(seat: Seat | undefined): Transaction | null {
   const t = seat === null ? ambient : seat || null;
   return t && liveTx(t);
 }
@@ -71,23 +75,32 @@ function join(a: Transaction | null, b: Transaction | null): void {
 function enter(seat: Seat): Seat {
   const previous = current;
   if (current === null) ambient = flushTransaction;
-  current = seat && !transaction(seat) ? null : seat;
+  current = seat && transaction(seat);
   setFlushTransaction(transaction(seat));
   return previous;
 }
-function exit(previous: unknown): void {
-  current = previous as Seat;
-  if (current && !transaction(current)) current = null;
+function exit(previous: Seat): void {
+  current = previous && transaction(previous);
   setFlushTransaction(transaction(current));
 }
-function claim(node: Signal<any>): void {
-  if (current && !transaction(current)) current = null;
-  if (current === false || passLane !== null || node._config & CONFIG_OVERRIDE) return;
-  if (hooks._active && proposals.has(node) && (node as any)._type !== EFFECT_RENDER)
-    join(proposals.get(node)!, current);
-  proposals.set(node, current);
+function run<T>(seat: Seat, fn: () => T, nextObserver = observer): T {
+  const previous = enter(seat),
+    previousObserver = observer;
+  observer = nextObserver;
+  try {
+    bypass = true;
+    return fn();
+  } finally {
+    bypass = false;
+    observer = previousObserver;
+    exit(previous);
+  }
 }
-
+function includes(groups: Iterable<Transaction>, t: Transaction): boolean {
+  t = resolveTx(t);
+  for (const group of groups) if (resolveTx(group) === t) return true;
+  return false;
+}
 const hooks: IndependentHooks = {
   _active: false,
   _compute(node, create, fn) {
@@ -99,17 +112,7 @@ const hooks: IndependentHooks = {
     causes.delete(node);
     replays.delete(node);
     if (!hooks._active) return false;
-    const previous = enter(seat);
-    const previousObserver = observer;
-    observer = node;
-    try {
-      bypass = true;
-      fn(node, create);
-    } finally {
-      bypass = false;
-      observer = previousObserver;
-      exit(previous);
-    }
+    run(seat, () => fn(node, create), node);
     return true;
   },
   _wrap() {
@@ -118,32 +121,18 @@ const hooks: IndependentHooks = {
     return false;
   },
   _run(node, fn) {
-    if (!hooks._active) return fn();
+    // Called only after _wrap has checked activation and consumed the bypass.
     const t =
       (node as Transaction)._nodes !== undefined
         ? resolveTx(node as Transaction)
         : (node as Signal<any>)._config & CONFIG_HELD
           ? txOf(node as Signal<any>)
           : transaction(proposals.get(node as Signal<any>) ?? null);
-    let seat: Transaction | null = null;
-    if (t)
-      for (const group of independentGroups)
-        if (resolveTx(group) === t) {
-          seat = t;
-          break;
-        }
-    const previous = enter(seat);
-    try {
-      bypass = true;
-      return fn();
-    } finally {
-      bypass = false;
-      exit(previous);
-    }
+    return run(t && includes(independentGroups, t) ? t : null, fn);
   },
   _joined(t) {
     if (!hooks._active) return;
-    if (current && !transaction(current)) current = null;
+    current = current && transaction(current);
     if (current === null) ambient = t;
     else if (current !== false) {
       independentGroups.add(t);
@@ -151,18 +140,24 @@ const hooks: IndependentHooks = {
     }
   },
   _write(node, changed) {
-    if (changed || node._pendingValue !== NOT_PENDING) claim(node);
+    if (!changed && node._pendingValue === NOT_PENDING) return;
+    current = current && transaction(current);
+    if (current === false || passLane !== null || node._config & CONFIG_OVERRIDE) return;
+    const previous = proposals.get(node);
+    if (hooks._active && previous !== undefined && (node as any)._type !== EFFECT_RENDER)
+      join(previous, current);
+    proposals.set(node, current);
   },
-  _stage: claim,
   _cause(node, sub) {
     if (passLane !== null || current === false) return;
-    const seat = proposals.has(node) ? proposals.get(node)! : current;
+    const proposal = proposals.get(node);
+    const seat = proposal === undefined ? current : proposal;
     if (!hooks._active) {
       causes.set(sub, null);
       return;
     }
-    if (causes.has(sub)) {
-      const previous = causes.get(sub)!;
+    const previous = causes.get(sub);
+    if (previous !== undefined) {
       if (previous === false || same(previous, seat)) return;
       if ((sub as any)._type === EFFECT_RENDER) {
         causes.set(sub, false);
@@ -208,7 +203,7 @@ const hooks: IndependentHooks = {
   },
   _enqueue(type: number, fn: QueueCallback) {
     if (!hooks._active) return false;
-    if (current && !transaction(current)) current = null;
+    current = current && transaction(current);
     // A shared pass reads the committed world. A ready group's landing
     // requeues it before its callback can show an obsolete combination.
     if (current === false) return observer !== null && replays.has(observer);
@@ -218,28 +213,21 @@ const hooks: IndependentHooks = {
   },
   _park(nodes) {
     if (!hooks._active) return;
-    const groups = new Map<Transaction, Signal<any>[]>();
     let count = 0;
     for (const node of nodes) {
-      const seat = proposals.get(node);
-      const t = seat === undefined ? null : transaction(seat);
+      const t = transaction(proposals.get(node));
       if (t && t !== transaction(null)) {
-        let list = groups.get(t);
-        if (!list) groups.set(t, (list = []));
-        list.push(node);
+        // Parking changes this node and its frame, not group membership:
+        // no intermediate map or per-group staging arrays are needed.
+        parkNode(node, t);
+        if (node._config & CONFIG_HELD) proposals.set(node, txOf(node));
+        else if (node._pendingValue === NOT_PENDING) proposals.delete(node);
       } else nodes[count++] = node;
     }
     nodes.length = count;
-    for (const [t, list] of groups) {
-      parkNodes(list, t);
-      for (const node of list) {
-        if (node._config & CONFIG_HELD) proposals.set(node, txOf(node));
-        else if (node._pendingValue === NOT_PENDING) proposals.delete(node);
-      }
-    }
     // Freeze the ordinary batch's identity before the next batch starts.
     const t = transaction(null);
-    if (t) for (const node of nodes) if (proposals.has(node)) proposals.set(node, t);
+    if (t) for (const node of nodes) if (proposals.get(node) !== undefined) proposals.set(node, t);
     setFlushTransaction(t);
   },
   _seam() {
@@ -247,8 +235,8 @@ const hooks: IndependentHooks = {
     for (const t of independentGroups) if (!liveTx(t)) independentGroups.delete(t);
     hooks._active = independentGroups.size !== 0;
     ambient = null;
-    trims = new WeakMap();
-    setFlushTransaction(current === null || current === false ? null : liveTx(current));
+    trims = new Ownership();
+    setFlushTransaction((current && liveTx(current)) || null);
   },
   _commit(node) {
     proposals.delete(node);
@@ -256,47 +244,44 @@ const hooks: IndependentHooks = {
   _guess(node) {
     // Without optimistic primitives, the consumer can drop guess ownership.
     if (!laneStageHook || current === false) return;
-    if (hooks._active && guesses.has(node)) join(guesses.get(node)!, current);
+    const previous = guesses.get(node);
+    if (hooks._active && previous !== undefined) join(previous, current);
     guesses.set(node, current);
   },
   _guessParent(node) {
     if (!laneStageHook) return;
     if (node === undefined) {
-      guesses = new WeakMap();
+      guesses = new Ownership();
       return;
     }
-    return hooks._active && guesses.has(node) ? transaction(guesses.get(node)!) : undefined;
+    const seat = guesses.get(node);
+    return hooks._active && seat !== undefined ? transaction(seat) : undefined;
   },
   _stale(reader, t) {
     if (!hooks._active) return false;
     let groups = replays.get(reader);
-    if (!groups) replays.set(reader, (groups = new Set()));
-    for (const group of groups) if (resolveTx(group) === resolveTx(t)) return false;
-    groups.add(t);
+    if (!groups) replays.set(reader, (groups = []));
+    if (includes(groups, t)) return false;
+    groups.push(t);
     return true;
   },
   _replay(reader, t) {
     const groups = replays.get(reader);
-    if (!groups) return false;
-    if (!t) return true;
-    for (const group of groups) if (resolveTx(group) === t) return true;
-    return false;
+    return !!groups && (!t || includes(groups, t));
   },
   _trim(node, record) {
     if (record) {
       if (hooks._active) trims.set(node, current);
       return false;
     }
-    const seat = trims.get(node);
-    const t = seat === undefined ? null : transaction(seat);
+    const t = transaction(trims.get(node));
     return t !== null && blocked(t);
   },
   _zombies(nodes, ready) {
     if (!hooks._active) return;
     let count = 0;
     for (const node of nodes) {
-      const seat = causes.get(node);
-      const t = seat === undefined ? transaction(null) : transaction(seat);
+      const t = transaction(causes.get(node) ?? null);
       if (t !== null && blocked(t)) continue;
       if (ready) {
         if (!(node._config & CONFIG_VERDICT)) ready.push(node);

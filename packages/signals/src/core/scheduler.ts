@@ -71,7 +71,6 @@ export interface IndependentHooks {
   _run<T>(node: Signal<any> | Transaction, fn: () => T): T;
   _joined(t: Transaction): void;
   _write(node: Signal<any>, changed: boolean): void;
-  _stage(node: Signal<any>): void;
   _cause(node: Signal<any>, sub: Computed<any>): void;
   _read(reader: Computed<any>, node: Signal<any>): boolean;
   _enqueue(type: number, fn: QueueCallback): boolean;
@@ -624,57 +623,52 @@ export function list(n: Signal<any>, t: Transaction): void {
   t._nodes.push(n);
 }
 
-/** Park one group using the same exclusions as the ordinary flush. */
-export function parkNodes(nodes: Signal<any>[], t: Transaction): void {
-  // `t._nodes` grows under the walk (holdFrame pushes); the bound is
-  // this flush's list, which does not.
-  for (let i = 0, count = nodes.length; i < count; i++) {
-    const n = nodes[i];
-    // Already held: the pass that re-staged it joined its transaction,
-    // which is `t` (or merged into it). Lane work is the lane's (a
-    // pending mark propagated onto it queued it here too).
-    if (!(n._config & (CONFIG_HELD | CONFIG_OVERRIDE)) && !n._x?._transaction?._lane) {
-      // A loading source — pending with nothing staged and no committed
-      // value (A16, A19 exc. 1: uninitialized is loading, not pending)
-      // that is not an observer — is nobody's frame: not held. Its
-      // first landing is commit #0, not a resumption of this frame, and
-      // a write that reaches it later overlaps nothing (#2937: the
-      // stale stamp was the bridge that entangled unrelated updates
-      // with a never-resolving flight). Its observers are held and
-      // wait on its flight (`blocked`).
-      if (
-        n._pendingValue === NOT_PENDING &&
-        (n as Computed<any>)._statusFlags & STATUS_UNINITIALIZED &&
-        (n as any)._type !== EFFECT_RENDER
-      )
-        continue;
-      // A34 (2): a tick whose writes net to the committed value made no
-      // proposal (`setShow(false); setShow(true)` on a committed true) —
-      // not staged, not held, pends nothing; a later write to it is
-      // plain mainline. (A node already held stays held when written
-      // back: A34 (1).)
-      if (
-        n._pendingValue !== NOT_PENDING &&
-        !((n as Computed<any>)._statusFlags & (STATUS_PENDING | STATUS_UNINITIALIZED)) &&
-        n._x?._pendingFirstChild == null &&
-        n._x?._pendingDisposal == null &&
-        // The comparator last: a pass that created children (an object
-        // owning a fresh async memo, #4111) must not have it read them.
-        // A NotReady read there is a change (`isSame`).
-        isSame(n, n._value, n._pendingValue)
-      ) {
-        n._pendingValue = NOT_PENDING;
-        n._config &= ~CONFIG_STAGED;
-        independentHooks?._commit(n);
-        continue;
-      }
-      holdNode(n, t);
+/** Park one staged node using the same exclusions in every group. */
+export function parkNode(n: Signal<any>, t: Transaction): void {
+  // Already held: the pass that re-staged it joined its transaction,
+  // which is `t` (or merged into it). Lane work is the lane's (a
+  // pending mark propagated onto it queued it here too).
+  if (!(n._config & (CONFIG_HELD | CONFIG_OVERRIDE)) && !n._x?._transaction?._lane) {
+    // A loading source — pending with nothing staged and no committed
+    // value (A16, A19 exc. 1: uninitialized is loading, not pending)
+    // that is not an observer — is nobody's frame: not held. Its
+    // first landing is commit #0, not a resumption of this frame, and
+    // a write that reaches it later overlaps nothing (#2937: the
+    // stale stamp was the bridge that entangled unrelated updates
+    // with a never-resolving flight). Its observers are held and
+    // wait on its flight (`blocked`).
+    if (
+      n._pendingValue === NOT_PENDING &&
+      (n as Computed<any>)._statusFlags & STATUS_UNINITIALIZED &&
+      (n as any)._type !== EFFECT_RENDER
+    )
+      return;
+    // A34 (2): a tick whose writes net to the committed value made no
+    // proposal (`setShow(false); setShow(true)` on a committed true) —
+    // not staged, not held, pends nothing; a later write to it is
+    // plain mainline. (A node already held stays held when written
+    // back: A34 (1).)
+    if (
+      n._pendingValue !== NOT_PENDING &&
+      !((n as Computed<any>)._statusFlags & (STATUS_PENDING | STATUS_UNINITIALIZED)) &&
+      n._x?._pendingFirstChild == null &&
+      n._x?._pendingDisposal == null &&
+      // The comparator last: a pass that created children (an object
+      // owning a fresh async memo, #4111) must not have it read them.
+      // A NotReady read there is a change (`isSame`).
+      isSame(n, n._value, n._pendingValue)
+    ) {
+      n._pendingValue = NOT_PENDING;
+      n._config &= ~CONFIG_STAGED;
+      independentHooks?._commit(n);
+      return;
     }
-    // A held pass's frame is held with it (ruling A, O2): the children it
-    // created are the transaction's — they compute, and a pass over them
-    // or a write that reaches them joins; they effect at the landing.
-    if (n._config & CONFIG_STAGED) holdFrame(n as unknown as Owner, t);
+    holdNode(n, t);
   }
+  // A held pass's frame is held with it (ruling A, O2): the children it
+  // created are the transaction's — they compute, and a pass over them
+  // or a write that reaches them joins; they effect at the landing.
+  if (n._config & CONFIG_STAGED) holdFrame(n as unknown as Owner, t);
 }
 
 /** Hold the (uncommitted) frame under a held pass: every computed in the
@@ -1046,7 +1040,8 @@ export class GlobalQueue implements IQueue {
     // (Resolved: a guess over another transaction's guess merged them.)
     const t = joined !== null && !joined._lane ? resolveTx(joined) : null;
     if (t !== null) {
-      parkNodes(pendingNodes, t);
+      // Holding frames grows t._nodes, not this flush's pending list.
+      for (let i = 0, count = pendingNodes.length; i < count; i++) parkNode(pendingNodes[i], t);
       pendingNodes.length = 0;
       storeParkHook?.(t);
 
@@ -1361,7 +1356,7 @@ export function staleReader(c: Computed<any>, t: Transaction): void {
 }
 
 export function queuePendingNode(node: Signal<any>): void {
-  independentHooks?._stage(node);
+  independentHooks?._write(node, true);
   if (__DEV__) lastStagedNodeName = (node as any)._name ?? null;
   pendingNodes.push(node);
   if (!globalQueue._running) markUnflushedStaged(); // A28

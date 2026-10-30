@@ -504,6 +504,21 @@ describe("pay-for-use tree-shaking (#2883)", () => {
     expect(result).toBe("ok");
   });
 
+  it.each([
+    ["core", "", 3000],
+    ["store", ", createStore", 3100],
+    ["optimistic", ", createOptimistic", 3300]
+  ] as const)("independent keeps its %s import cost compact", async (_, extra, ceiling) => {
+    const core = "createSignal, createMemo, createEffect, createRoot, flush";
+    const plain = await bundleFixture(`export { ${core}${extra} } from "sigsrc";`);
+    const grouped = await bundleFixture(`export { ${core}${extra}, independent } from "sigsrc";`);
+    expect(grouped.retained).toContain("independent.ts");
+    // Marginal bytes: unrelated changes to the core do not spend the grouping
+    // engine's budget. scripts/independent-size.mjs also measures packaged JS
+    // and compression; the shipped Rolldown scenario has its own brotli cap.
+    expect(grouped.minifiedBytes - plain.minifiedBytes).toBeLessThanOrEqual(ceiling);
+  });
+
   it("createOptimistic loads the lane engine; the floor ceiling reflects its absence", async () => {
     const { retained } = await bundleFixture(
       `export { createSignal, createEffect, createRoot, flush, createOptimistic } from "sigsrc";`
