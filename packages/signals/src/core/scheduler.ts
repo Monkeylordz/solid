@@ -57,30 +57,32 @@ import type { Computed, Owner, Signal } from "./types.js";
 // bundle that never imports the installing module never assigns them — its
 // minifier folds every guarded call site (and the branch behind it) away.
 // Each module installs its own set at evaluation (pay-for-use).
+// Independent hook properties stay private to this package and are mangled
+// with the rest of its `_` fields. `_guessParent` avoids reserved `_parent`.
 export interface IndependentHooks {
-  active: boolean;
-  compute(
+  _active: boolean;
+  _compute(
     node: Computed<any>,
     create: boolean,
     fn: (node: Computed<any>, create: boolean) => void
   ): boolean;
-  wrap(): boolean;
-  run<T>(node: Signal<any> | Transaction, fn: () => T): T;
-  joined(t: Transaction): void;
-  write(node: Signal<any>, changed: boolean): void;
-  stage(node: Signal<any>): void;
-  cause(node: Signal<any>, sub: Computed<any>): void;
-  read(reader: Computed<any>, node: Signal<any>): boolean;
-  enqueue(type: number, fn: QueueCallback): boolean;
-  park(nodes: Signal<any>[]): void;
-  seam(): void;
-  commit(node: Signal<any>): void;
-  guess(node: Signal<any>): void;
-  parent(node?: Signal<any>): Transaction | null | undefined;
-  stale(reader: Computed<any>, t: Transaction): boolean;
-  replay(reader: Computed<any>, t?: Transaction): boolean;
-  trim(node: Computed<any>, record?: boolean): boolean;
-  zombies(nodes: Computed<any>[], ready?: Computed<any>[]): void;
+  _wrap(): boolean;
+  _run<T>(node: Signal<any> | Transaction, fn: () => T): T;
+  _joined(t: Transaction): void;
+  _write(node: Signal<any>, changed: boolean): void;
+  _stage(node: Signal<any>): void;
+  _cause(node: Signal<any>, sub: Computed<any>): void;
+  _read(reader: Computed<any>, node: Signal<any>): boolean;
+  _enqueue(type: number, fn: QueueCallback): boolean;
+  _park(nodes: Signal<any>[]): void;
+  _seam(): void;
+  _commit(node: Signal<any>): void;
+  _guess(node: Signal<any>): void;
+  _guessParent(node?: Signal<any>): Transaction | null | undefined;
+  _stale(reader: Computed<any>, t: Transaction): boolean;
+  _replay(reader: Computed<any>, t?: Transaction): boolean;
+  _trim(node: Computed<any>, record?: boolean): boolean;
+  _zombies(nodes: Computed<any>[], ready?: Computed<any>[]): void;
 }
 export let independentHooks: IndependentHooks | null = null;
 export function installIndependentHooks(hooks: IndependentHooks): void {
@@ -393,7 +395,7 @@ export function joinFuture(t: Transaction | null): void {
   if (f === null) {
     flushTransaction = t === null ? newTransaction(false) : resolveTx(t);
   } else if (t !== null) merge(resolveTx(t), f);
-  independentHooks?.joined(resolveTx(flushTransaction!));
+  independentHooks?._joined(resolveTx(flushTransaction!));
   if (!globalQueue._running) schedule();
 }
 /** `t` merges into `f`: the work that touched both entangles them (A15).
@@ -515,7 +517,7 @@ function blockedBy(nodes: Signal<any>[], owner: Transaction, own = false): boole
       if (
         (((r as any)._type === EFFECT_RENDER && r._statusFlags & STATUS_PENDING) ||
           r._flags & REACTIVE_FRAME_READ ||
-          independentHooks?.replay(r) ||
+          independentHooks?._replay(r) ||
           (r._config & CONFIG_REDERIVE && r._statusFlags === STATUS_PENDING)) &&
         (s._gen === r._depGen || r._x?._error != null) &&
         !(r._flags & REACTIVE_DISPOSED) &&
@@ -557,7 +559,7 @@ function removalStagedBy(r: Computed<any>, t: Transaction): boolean {
  * committing pass replaces it. */
 const heldTrims: Computed<any>[] = [];
 export function heldTrim(el: Computed<any>): void {
-  independentHooks?.trim(el, true);
+  independentHooks?._trim(el, true);
   heldTrims.push(el);
 }
 /** Zombies popped from the dirty heap this flush (`deferZombie`). The seam
@@ -630,7 +632,7 @@ export function parkNodes(nodes: Signal<any>[], t: Transaction): void {
       ) {
         n._pendingValue = NOT_PENDING;
         n._config &= ~CONFIG_STAGED;
-        independentHooks?.commit(n);
+        independentHooks?._commit(n);
         continue;
       }
       holdNode(n, t);
@@ -990,7 +992,7 @@ export class GlobalQueue implements IQueue {
     // have run (lanes.ts); a correction's re-derivations run in one more
     // pure round — the parent's flights before the parent is judged below.
     if (laneCorrectionsHook?.()) runHeap(dirtyQueue, GlobalQueue._update);
-    independentHooks?.park(pendingNodes);
+    independentHooks?._park(pendingNodes);
     const joined = flushTransaction;
     flushTransaction = null;
     // The frame's verdict is in: the guesses written since the last seam
@@ -1019,7 +1021,7 @@ export class GlobalQueue implements IQueue {
       // it (nothing commits this seam that could dispose it).
       // (Verdict readers exist only with the verdict engine installed.)
       const zombies = deferredZombies.splice(0);
-      independentHooks?.zombies(zombies, deferredZombies);
+      independentHooks?._zombies(zombies, deferredZombies);
       if (observeFlightHook) {
         zombies.sort((a, b) => a._height - b._height);
         for (let i = 0; i < zombies.length; i++)
@@ -1040,7 +1042,7 @@ export class GlobalQueue implements IQueue {
       // `recompute`'s own gates.
       for (let i = 0; i < heldTrims.length; i++) {
         const t = heldTrims[i];
-        if (t._x?._error == null && !(t as any)._modified && !independentHooks?.trim(t))
+        if (t._x?._error == null && !(t as any)._modified && !independentHooks?._trim(t))
           trimStaleDeps(t);
       }
     }
@@ -1113,7 +1115,7 @@ export class GlobalQueue implements IQueue {
           : own[i];
     }
     if (deferredZombies.length !== 0) {
-      independentHooks?.zombies(deferredZombies);
+      independentHooks?._zombies(deferredZombies);
       // Survivors are the displayed frame of a held pass: they rerun for the
       // live write, parents before children.
       const zombies = deferredZombies.splice(0).sort((a, b) => a._height - b._height);
@@ -1124,7 +1126,7 @@ export class GlobalQueue implements IQueue {
     // Boundaries: readers that settled, landed or died this flush are
     // dropped; a fallback with none left reveals next round.
     boundarySeamHook?.();
-    independentHooks?.seam();
+    independentHooks?._seam();
   }
   run(type: number) {
     const effects = this._queues[type - 1];
@@ -1138,7 +1140,7 @@ export class GlobalQueue implements IQueue {
     // the frame (which may park). A lane pass that read the frame's own
     // staging is the frame's (`recompute` passes null): its run waits with
     // the frame.
-    if (type && !(lane === null && independentHooks?.enqueue(type, fn)))
+    if (type && !(lane === null && independentHooks?._enqueue(type, fn)))
       (lane !== null ? lane : this)._queues[type - 1].push(fn);
     schedule();
   }
@@ -1203,7 +1205,7 @@ export function reruns(u: Transaction): unknown {
     if (
       r._flags & REACTIVE_FRAME_READ ||
       r._config & CONFIG_VERDICT ||
-      independentHooks?.replay(r, u)
+      independentHooks?._replay(r, u)
     ) {
       frame ||= (r as any)._type;
       r._flags &= ~REACTIVE_FRAME_READ;
@@ -1280,7 +1282,7 @@ export const stagedReaders: Computed<any>[] = [];
  * holds (a render effect, a verdict reader, lane work) and is re-derived
  * after `t`'s landing (`_reruns`). Once per pass. */
 export function staleReader(c: Computed<any>, t: Transaction): void {
-  const additional = independentHooks?.stale(c, t);
+  const additional = independentHooks?._stale(c, t);
   if (!(c._flags & REACTIVE_FRAME_READ) || additional) {
     c._flags |= REACTIVE_FRAME_READ;
     t._reruns.push(c);
@@ -1288,7 +1290,7 @@ export function staleReader(c: Computed<any>, t: Transaction): void {
 }
 
 export function queuePendingNode(node: Signal<any>): void {
-  independentHooks?.stage(node);
+  independentHooks?._stage(node);
   if (__DEV__) lastStagedNodeName = (node as any)._name ?? null;
   pendingNodes.push(node);
   if (!globalQueue._running) markUnflushedStaged(); // A28
@@ -1339,7 +1341,7 @@ export function insertSubs(node: Signal<any> | Computed<any>): void {
       sub._flags |= REACTIVE_SNAPSHOT_STALE;
       continue;
     }
-    independentHooks?.cause(node, sub);
+    independentHooks?._cause(node, sub);
     enqueueSub(sub);
   }
   if (__OBSERVE__ && fanOut >= GRAPH_SIZE_WARN_AT) noteFanOut(node, fanOut);
@@ -1365,7 +1367,7 @@ export function sameLane(a: Transaction, b: Transaction): boolean {
 }
 
 export function commitPendingNode(n: Signal<any>): void {
-  independentHooks?.commit(n);
+  independentHooks?._commit(n);
   const c = n as Partial<Computed<unknown>>;
   // L2: the commit is where a pass, held or not, stops being uncommitted —
   // unless it has no answer yet. A pass still in flight (pending, nothing

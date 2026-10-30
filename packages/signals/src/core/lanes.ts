@@ -143,7 +143,7 @@ export function optimisticWrite<T>(n: Signal<T> | Computed<T>, v: T | ((prev: T)
   const prev = guessedValueOf(n);
   if (typeof v === "function") v = (v as (prev: T) => T)(prev);
   if (n._equals && n._equals(prev, v) && !(n._config & CONFIG_GUESS)) return v;
-  independentHooks?.guess(n);
+  independentHooks?._guess(n);
   pendingGuesses.push(n, v, question || nextQuestion());
   schedule();
   return v;
@@ -171,7 +171,7 @@ function applyGuesses(parent: Transaction | null): void {
   let lane: Transaction | null = null;
   for (let i = 0; i < pendingGuesses.length; i += 3) {
     const n = pendingGuesses[i] as Signal<any>;
-    const group = independentHooks?.parent(n);
+    const group = independentHooks?._guessParent(n);
     if (group !== undefined && group !== parent) {
       parent = group;
       lane = null;
@@ -226,7 +226,7 @@ function applyGuesses(parent: Transaction | null): void {
     }
   }
   pendingGuesses.length = 0;
-  independentHooks?.parent();
+  independentHooks?._guessParent();
 }
 
 /** The running pass read lane `l`'s work as a derivation: it is `l`'s — or,

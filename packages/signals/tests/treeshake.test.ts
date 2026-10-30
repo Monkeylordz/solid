@@ -653,6 +653,44 @@ describe("pay-for-use tree-shaking (#2883)", () => {
           });
         }
       );
+      it.skipIf(!existsSync(dist))(
+        `independent retains optimistic ownership in ${tier}`,
+        async () => {
+          const { retained, bundledCode } = await bundleDistFixture(
+            `import { createSignal, createOptimistic, createMemo, createRenderEffect, createRoot, flush, independent } from "sigdist";
+             export async function run() {
+               let finish, dispose;
+               const pending = new Promise(resolve => { finish = resolve; });
+               const values = [];
+               const { setPage, setGuess } = createRoot(d => {
+                 dispose = d;
+                 const [page, setPage] = createSignal(0);
+                 const [guess, setGuess] = createOptimistic(0);
+                 createRenderEffect(createMemo(() => page() ? pending : 0), () => {});
+                 createRenderEffect(guess, value => { values.push(value); });
+                 return { setPage, setGuess };
+               });
+               flush();
+               independent(() => { setPage(1); setGuess(9); });
+               flush();
+               const held = values.slice();
+               finish(1);
+               for (let i = 0; i < 10; i++) await Promise.resolve();
+               flush();
+               dispose();
+               return { held, values };
+             }`,
+            dist
+          );
+          expect(retainedFrom(retained, ["independent.js", "core/lanes.js"])).toEqual([
+            "independent.js",
+            "core/lanes.js"
+          ]);
+          const url = `data:text/javascript;base64,${Buffer.from(bundledCode).toString("base64")}`;
+          const { run } = await import(/* @vite-ignore */ url);
+          expect(await run()).toEqual({ held: [0, 9], values: [0, 9, 0] });
+        }
+      );
     }
     it("isPending-only fixture retains the same module set as src — packaging adds no coupling", async () => {
       const fixture = `export { createSignal, createEffect, createRoot, flush, isPending, latest } from "SPEC";`;

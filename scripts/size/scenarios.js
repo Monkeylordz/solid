@@ -609,7 +609,9 @@ module.exports = [
     import: "{ createSignal, createMemo, createEffect, createRoot, flush, independent }",
     // The grouping engine is optional: the core-only scenario above must
     // continue to shed it, including its context and bookkeeping hooks.
-    limit: "8.75 KB"
+    // Private hook mangling, optimistic-only bookkeeping guards, and fewer
+    // map lookups: 23,811 -> 23,414 B minified; 8,684 -> 8,573 B brotli.
+    limit: "8.60 KB"
   },
   {
     name: "signals: + createStore",
