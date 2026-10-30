@@ -57,8 +57,8 @@ export function reconcileState(
   // truth but an optimistic edit — the keyed diff is written into the draft
   // (a matched row keeps its proxy, its changed leaves become its guesses),
   // and the setter's exit turns the draft into guesses like any.
-  if (userWriting() && t.fam?.opt === true) {
-    optHooks!.reconcile(state, unwrapValue(value), keyFn);
+  if (optHooks && userWriting() && t.fam?.opt === true) {
+    optHooks.reconcile(state, unwrapValue(value), keyFn);
     return;
   }
   // Replace-mode root handed another store's proxy: chain to it (§7b).
@@ -100,14 +100,17 @@ function applyAdopt(t: StoreTarget, incoming: any, keyFn: KeyFn | null, proj = f
   // Q-D: a landing on an optimistic family is reconciled against the VIEW
   // — key matching from the arrangement the guesses made (R28), so a row
   // the guess added keeps its proxy when the server returns it.
-  const prevView = t.fam?.opt === true ? optHooks!.view(t, old) : old;
+  const prevView = optHooks && t.fam?.opt === true ? optHooks.view(t, old) : old;
   const nextArr = Array.isArray(incoming);
   const shallow = t.s === true;
   adoptPB(t, incoming, false);
   if (shallow) markRawIngest(incoming);
   // The deep witness is bumped once per adoption (none to bump: done).
   let bumped = t.dk === null;
-  if (Array.isArray(prevView) !== nextArr) {
+  // A live chained base (a store proxy, §7b) reads the inner store's
+  // current frame, not what the nodes were last told — nothing to diff
+  // against: the fold writes every node (#4361).
+  if (Array.isArray(prevView) !== nextArr || old[$TARGET]) {
     notifyFold(t, old, incoming);
     return;
   }
@@ -225,7 +228,10 @@ function applyAdopt(t: StoreTarget, incoming: any, keyFn: KeyFn | null, proj = f
   let nodesHit = 0;
   for (const k in incoming) {
     const nv = (incoming as any)[k];
-    const ov = (old as any)[k];
+    let ov = (old as any)[k];
+    // A key under a guess is judged against the guess too (D-34): a truth
+    // equal to the value the guess covered still answers it.
+    if (optHooks && ov === nv && prevView !== old) ov = (prevView as any)[k];
     const isObj = nv !== null && typeof nv === "object";
     if (
       ov === nv &&

@@ -98,3 +98,59 @@ describe("validate error parity", () => {
     });
   }
 });
+
+// SSR templates validate too: server-component markup only ever compiles
+// for the server. The Babel plugin skips SSR templates, so these assert the
+// Oxc error alone and that its DOM diff matches the DOM compile's.
+const ssrCases = {
+  pInDiv: { code: "const t = <p>a<div>b</div></p>;", throws: true },
+  hydratablePInDiv: {
+    code: "const t = <p class={c()}>a<div>b</div></p>;",
+    options: { hydratable: true },
+    throws: true
+  },
+  // Table partials, attribute holes and hydration keys must not misfire.
+  trPartial: {
+    code: "const t = <tr class={c()}><td>{x()}</td></tr>;",
+    options: { hydratable: true },
+    throws: false
+  },
+  tdPartial: { code: "const t = <td title={t()}>cell</td>;", throws: false },
+  // SVG partials parse under an `<svg>` like the DOM compile's (#4241).
+  svgImageUnderShow: {
+    code: "const t = <svg><Show when={on()}><image href='a.png' /></Show></svg>;",
+    options: { hydratable: true },
+    throws: false
+  },
+  svgGRoot: { code: "const t = <g><image href='a.png' /></g>;", throws: false },
+  svgFragment: {
+    code: "const t = <><clipPath id='c'><circle r={1} /></clipPath><image href='a.png' /></>;",
+    options: { hydratable: true },
+    throws: false
+  },
+  svgImageRoot: { code: "const t = <image href={h()} />;", throws: false },
+  mathRoot: { code: "const t = <mi>x</mi>;", throws: false },
+  disabled: {
+    code: "const t = <p>a<div>b</div></p>;",
+    options: { validate: false },
+    throws: false
+  }
+};
+
+describe("ssr validate", () => {
+  for (const [name, { code, options = {}, throws }] of Object.entries(ssrCases)) {
+    test(name, () => {
+      const ssr = runCompile(oxcRunner, code, {
+        moduleName: "r-server",
+        generate: "ssr",
+        ...options
+      });
+      expect(ssr.threw).toBe(throws);
+      expect(ssr.stderr.includes("malformed")).toBe(throws);
+      if (throws) {
+        const dom = runCompile(oxcRunner, code, { moduleName: "r-dom", ...options });
+        expect(domDiff(ssr.stderr)).toBe(domDiff(dom.stderr));
+      }
+    });
+  }
+});

@@ -140,6 +140,14 @@ render(
 
 **Scope:** the diagnostic only fires during the synchronous body of `render()` / `hydrate()`. Post-mount route transitions (including lazy route changes) run under their own transitions with the guard off, so they do not emit this warning.
 
+#### `LOADING_ON_ACCESSOR`
+
+**Message:** "[LOADING_ON_ACCESSOR] A Loading boundary's `on` received a function. `on` takes the dependency's value — `on={route()}`, or `on={[query(), page()]}` for several — and an accessor passed instead is never called, so nothing is read and the boundary never re-arms."
+
+**Severity:** `warn` (non-halting)
+
+`on` is read the way any JSX prop is: the compiler wraps `on={route()}` in a getter, so the boundary tracks `route` through it. `on={route}` or `on={() => route()}` hands the boundary the function itself, a value that never changes, and the boundary never calls it. Checked once, on the boundary's first run. `createLoadingBoundary(fn, fallback, { on })` reports the same shape when its `on` function returns a function.
+
 #### `LOADING_ON_OUTSIDE_HOLD`
 
 **Message:** "`on` re-armed a Loading boundary, but `comments` is also read outside it and holds the frame: the fallback can never be seen — the frame waits on the very source the boundary is waiting on. Move the outside read under the boundary so one hold owns the data. (Reading `latest()` in `on` shows the fallback now, beside the held frame.)"
@@ -205,6 +213,12 @@ const handleClick = () => {
   onSettled(() => toast("Saved!"));
 };
 ```
+
+#### `ON_FLUSH_IN_OWNED_SCOPE`
+
+**Message:** "onFlush called in an owned scope (a component body or a computation). It is meant for event handlers and effect callbacks; to run work after this scope's first stable render, use onSettled."
+
+`onFlush` schedules one callback right after the pending flush, without waiting on async work. That is for imperative code: event handlers and effect callbacks (including `createTrackedEffect` and `onSettled` bodies). In a component body or a computation it still runs, but it is almost always the wrong tool there: setup after the first stable render belongs in `onSettled`, and a computation should not schedule side effects at all.
 
 #### `PRIMITIVE_IN_FORBIDDEN_SCOPE`
 
@@ -619,6 +633,12 @@ Finding (`error`, observe + dev) plus the existing behavior: the dev build **thr
 
 Finding (`error`, observe + dev) plus a **rejection in every tier**: the async `dynamic()` memo rejects with the message (the dev build's full guidance; other tiers the first sentence), and the nearest `<Errored>` / `renderToStream`'s `onError` contains it like any render error. An async `dynamic()` instance is an ordinary async memo whose landing is serialized for the client to adopt ([#3666](https://github.com/solidjs/solid/issues/3666)); a server component crosses as a flight reference and a tag name as a value, but a client component _function_ has no encoding — an unguarded record would leave the client's memo pending forever, and the alternative (the client re-running the source and awaiting it under the boundary) is exactly the phantom-fallback bug the adoption fixes. So the server refuses the landing at the point the memo would serialize it. `data.component` is the function's name; no `ownerPath` — the landing is classified in a promise continuation, where no owner is current. Resolve the async upstream (`createAsync`/`createMemo` the source reads synchronously, so the source itself is sync and never serializes), or use `lazy()` for code the client must load. Sync sources are untouched: a sync `dynamic(() => Editor)` writes no record.
 
+#### `ASYNC_MEMO_ELEMENT`
+
+**Message:** "[ASYNC_MEMO_ELEMENT] An async memo resolved to rendered output (JSX, or a component's result), which cannot be serialized for hydration: the client would wait on a value that never arrives, and the boundary around it would never hydrate. Return data from the async memo and render the JSX from it in the component (`const user = createMemo(async () => fetchUser(id)); return <Profile user={user()} />`)."
+
+Finding (`error`, observe + dev) plus a **rejection in every tier**: the memo rejects with the message (the dev build's full guidance; other tiers the first clause), and its boundary contains it like any render error — the nearest `<Errored>` renders its fallback, which the client hydrates; with none, the `<Loading>` fragment rejects and the client renders the subtree, as for any other server render error there. An async memo's landing is serialized for the client to adopt; rendered output has no encoding. A boundary's output (`<Loading>`/`<Errored>`, an accessor) fails in the serializer, so the record never resolved and the hydrating memo waited on it forever ([#4242](https://github.com/solidjs/solid/issues/4242)); a template object crossed as a plain object, duplicating the markup, and the client could not insert it. Nor can the client rebuild the element without re-running the async work under the boundary — the pending beat `DYNAMIC_ASYNC_COMPONENT` refuses for the same reason. So the server refuses the landing where it lands, before the serializer sees it. What counts as rendered output: a boundary's output accessor, an SSR template object (`ssr()`/`ssrElement()`), or a fragment array holding either; only plain objects are inspected, so data — class instances, `Date`s, objects whose `t` is text or that carry other keys — is never refused. Applies to a thenable's landing and an async iterable's first value, where the memo serializes; `<NoHydration>` content, where nothing is serialized, is untouched. `ownerPath` names the memo's component. Return data from the async memo and render the JSX from it in the component.
+
 #### `SERVER_ERROR_SANITIZED`
 
 **Messages:**
@@ -940,6 +960,7 @@ The runtime derives a request's trace itself in every tier — the W3C `tracepar
 | `ASYNC_OUTSIDE_LOADING_BOUNDARY`   | warn       | async          | Async computation outside Loading boundary (non-halting; root mount is deferred)                                                                                  |
 | `CLEANUP_IN_FORBIDDEN_SCOPE`       | error      | lifecycle      | `onCleanup` inside trackedEffect/onSettled                                                                                                                        |
 | `SETTLED_CLEANUP_UNOWNED`          | error      | lifecycle      | `onSettled` returned a cleanup in an unowned (out-of-band) scope                                                                                                  |
+| `ON_FLUSH_IN_OWNED_SCOPE`          | warn       | lifecycle      | `onFlush` called in a component body or computation (meant for event handlers and effect callbacks)                                                               |
 | `PRIMITIVE_IN_FORBIDDEN_SCOPE`     | error      | lifecycle      | Reactive primitive created inside trackedEffect/onSettled                                                                                                         |
 | `PRIMITIVE_IN_EFFECT_CALLBACK`     | error      | lifecycle      | Memo, effect, or root created inside an effect callback or its cleanup, where there is no ambient owner (throws)                                                  |
 | `ACTION_CALLED_IN_OWNED_SCOPE`     | error      | write          | `action()` invoked from a component body or computation                                                                                                           |
@@ -954,6 +975,7 @@ The runtime derives a request's trace itself in every tier — the W3C `tracepar
 | `UNTRACKED_READ_AFTER_AWAIT`       | warn       | async          | Async computation first read a signal/memo/store key after an `await`; never a dependency (dev; V8 engines only)                                                  |
 | `PENDING_ASYNC_FORBIDDEN_SCOPE`    | warn       | async          | Pending async read in trackedEffect/onSettled                                                                                                                     |
 | `LOADING_ON_OUTSIDE_HOLD`          | warn       | async          | `<Loading on>` changed but its data is also read outside the boundary and holds the frame: the fallback can never be seen                                         |
+| `LOADING_ON_ACCESSOR`              | warn       | async          | `<Loading on>` received a function (an accessor) instead of the dependency's value; it is never called, so the boundary never re-arms                             |
 | `NO_OWNER_EFFECT`                  | warn       | lifecycle      | Effect created without reactive owner                                                                                                                             |
 | `NO_OWNER_CLEANUP`                 | warn       | lifecycle      | `onCleanup` called without owner                                                                                                                                  |
 | `NO_OWNER_BOUNDARY`                | warn       | lifecycle      | Boundary created without owner                                                                                                                                    |
@@ -985,6 +1007,7 @@ The runtime derives a request's trace itself in every tier — the W3C `tracepar
 | `SSR_STREAM_ABANDONED`             | warn       | ssr            | Response stream cancelled or sink failed with fragments pending (observe + dev)                                                                                   |
 | `LATE_HEADER_WRITE`                | error      | head           | Response header written after the head was sent; dropped (observe + dev; dev throws)                                                                              |
 | `DYNAMIC_ASYNC_COMPONENT`          | error      | ssr            | An async `dynamic()` source landed on a client component function, which cannot serialize for adoption; the memo rejects (observe + dev; rejects in every tier)   |
+| `ASYNC_MEMO_ELEMENT`               | error      | ssr            | An async memo landed on rendered output (JSX, a boundary), which cannot serialize for hydration; the memo rejects (observe + dev; rejects in every tier)          |
 | `SERVER_ERROR_SANITIZED`           | error/info | ssr            | Error replaced with the generic Error on the wire — `data.source` `"server-function"` (`error`) or `"ssr"` (`info`); `data.error` is the original (observe + dev) |
 | `FRAME_MARKER_CORRUPTED`           | error      | ssr            | Frame slot range missing its end marker on the client — nesting or an HTML rewriter (observe + dev)                                                               |
 | `SERVER_WRITE`                     | warn       | write          | Signal/store/optimistic setter ran during a server render; inert, will throw (dev; once per category)                                                             |

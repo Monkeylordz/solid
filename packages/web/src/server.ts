@@ -1669,7 +1669,9 @@ function isAttrName(prop: string): boolean {
 //   (`_$HY.v[id] = 1` — with the `id_fr` declaration the serializer already
 //   writes, this makes "which declared fragments are still outstanding" a
 //   pure record read for the runtime: no promise introspection, no DOM
-//   scan, valid across the pre-boot window), then announce it as
+//   scan, valid across the pre-boot window; for a rejected fragment's
+//   template, marked `e`, the record is the list of nodes it inserts, which
+//   a client boundary rendering the failure fresh clears, #4287), then announce it as
 //   `_$HY.fe(id, parent)` — the parent scopes consumers that need to look
 //   at what just landed (server-component boundaries adopt there) to the
 //   revealed fragment instead of the document. A marker that isn't in the
@@ -1702,7 +1704,7 @@ function isAttrName(prop: string): boolean {
 //   this script installed a listener in the same document.
 // - $dfg(id): group-style gate check; reveals a waiting group once all style counts hit zero.
 // - $dfj(ids): reveal a group in registration order, waiting if any member still has pending styles.
-const REPLACE_SCRIPT = `function $df(e){return _$HY.f?_$HY.f(e):$dfr(e)}function $dfr(e,n,o,t){if(!(n=document.getElementById(e)))return 0;if(!(o=document.getElementById("pl-"+e)))return(_$HY.dq=_$HY.dq||{})[e]=1,0;for(;o&&(8!==o.nodeType||o.nodeValue!=="pl-"+e);)t=o.nextSibling,o.remove(),o=t;t=o.parentNode,o.replaceWith(n.content),n.remove(),(_$HY.v=_$HY.v||{})[e]=1,_$HY.fe(e,t),_$HY.hp&&_$HY.hp[e]&&($dh(_$HY.hp[e]),delete _$HY.hp[e]),$dfd();return 1}function $dfl(e,o,n){if(!(o=document.getElementById("pl-"+e)))return(_$HY.dlq=_$HY.dlq||{})[e]=1,0;if(o._$fl)return 1;for(n=o.nextSibling;n;){if(8===n.nodeType&&n.nodeValue==="pl-"+e){o.parentNode&&o.parentNode.insertBefore(o.content.cloneNode(!0),n),o._$fl=1,$dfd();return 1}n=n.nextSibling}return 0}function $dflj(e,i){for(i=0;i<e.length;i++)$dfl(e[i])}function $dfd(e,i){if(e=_$HY.dq){_$HY.dq=0;for(i in e)$df(i)}if(e=_$HY.dlq){_$HY.dlq=0;for(i in e)$dfl(i)}}function $dfs(e,c,d){(_$HY.sc=_$HY.sc||{})[e]=c,d&&((_$HY.sd=_$HY.sd||{})[e]=1)}function $dfg(e,g,i,k){if(!(g=_$HY.sg&&_$HY.sg[e]))return;for(i=0;i<g.length;i++)if(_$HY.sc&&_$HY.sc[g[i]]>0)return;for(i=0;i<g.length;i++)k=g[i],delete _$HY.sg[k],$df(k)}function $dfc(e){if(--_$HY.sc[e]<=0){delete _$HY.sc[e],_$HY.sg&&_$HY.sg[e]?$dfg(e):!(_$HY.sd&&_$HY.sd[e])&&$df(e);_$HY.sd&&delete _$HY.sd[e]}}function $dfj(e,i,n){for(i=0;i<e.length;i++)if(_$HY.sc&&_$HY.sc[e[i]]>0){for(n=0;n<e.length;n++)(_$HY.sg=_$HY.sg||{})[e[n]]=e;return}for(i=0;i<e.length;i++)$df(e[i])}function $dfe(e,t,k){(t=e.target)&&t.getAttribute&&!t._$dc&&(k=t.getAttribute("data-dfc"))&&(t._$dc=1,$dfc(k))}document.addEventListener("load",$dfe,!0);document.addEventListener("error",$dfe,!0)`;
+const REPLACE_SCRIPT = `function $df(e){return _$HY.f?_$HY.f(e):$dfr(e)}function $dfr(e,n,o,t){if(!(n=document.getElementById(e)))return 0;if(!(o=document.getElementById("pl-"+e)))return(_$HY.dq=_$HY.dq||{})[e]=1,0;for(;o&&(8!==o.nodeType||o.nodeValue!=="pl-"+e);)t=o.nextSibling,o.remove(),o=t;t=o.parentNode,(_$HY.v=_$HY.v||{})[e]=n.hasAttribute("e")?[...n.content.childNodes]:1,o.replaceWith(n.content),n.remove(),_$HY.fe(e,t),_$HY.hp&&_$HY.hp[e]&&($dh(_$HY.hp[e]),delete _$HY.hp[e]),$dfd();return 1}function $dfl(e,o,n){if(!(o=document.getElementById("pl-"+e)))return(_$HY.dlq=_$HY.dlq||{})[e]=1,0;if(o._$fl)return 1;for(n=o.nextSibling;n;){if(8===n.nodeType&&n.nodeValue==="pl-"+e){o.parentNode&&o.parentNode.insertBefore(o.content.cloneNode(!0),n),o._$fl=1,$dfd();return 1}n=n.nextSibling}return 0}function $dflj(e,i){for(i=0;i<e.length;i++)$dfl(e[i])}function $dfd(e,i){if(e=_$HY.dq){_$HY.dq=0;for(i in e)$df(i)}if(e=_$HY.dlq){_$HY.dlq=0;for(i in e)$dfl(i)}}function $dfs(e,c,d){(_$HY.sc=_$HY.sc||{})[e]=c,d&&((_$HY.sd=_$HY.sd||{})[e]=1)}function $dfg(e,g,i,k){if(!(g=_$HY.sg&&_$HY.sg[e]))return;for(i=0;i<g.length;i++)if(_$HY.sc&&_$HY.sc[g[i]]>0)return;for(i=0;i<g.length;i++)k=g[i],delete _$HY.sg[k],$df(k)}function $dfc(e){if(--_$HY.sc[e]<=0){delete _$HY.sc[e],_$HY.sg&&_$HY.sg[e]?$dfg(e):!(_$HY.sd&&_$HY.sd[e])&&$df(e);_$HY.sd&&delete _$HY.sd[e]}}function $dfj(e,i,n){for(i=0;i<e.length;i++)if(_$HY.sc&&_$HY.sc[e[i]]>0){for(n=0;n<e.length;n++)(_$HY.sg=_$HY.sg||{})[e[n]]=e;return}for(i=0;i<e.length;i++)$df(e[i])}function $dfe(e,t,k){(t=e.target)&&t.getAttribute&&!t._$dc&&(k=t.getAttribute("data-dfc"))&&(t._$dc=1,$dfc(k))}document.addEventListener("load",$dfe,!0);document.addEventListener("error",$dfe,!0)`;
 
 // Head patch runtime, emitted once alongside the first head-patch task:
 // - $dha(ops): apply patch ops to document.head — "t" sets the title (and
@@ -2279,21 +2281,17 @@ export function renderToStream(code, options = {}) {
   });
   const blockingPromises = new Set();
   // Pre-shell pending-promise stubs (fragment `_fr` promises and thrown async
-  // sources) batch into ONE seroval write at shell flush. Every
-  // serializer.write() spins up a full crossSerializeStream session (plugin
-  // resolution, parser context, ref bookkeeping) — ~30% of shell CPU on an
-  // async-heavy page went to N of those sessions emitting formulaic deferred
-  // stubs. One object write collapses the session cost; a spreader task files
-  // each entry under its real `_$HY.r` key, and seroval's fulfillment
-  // machinery is untouched because it parses the same promise instances.
-  // Document-mode only: the serializer seam's keys are wire protocol for
-  // custom serializers (the frame sink's keyed codec addresses records BY
-  // key, no eval on the consumer), and the spreader task is a document
-  // <script> construct. Any serializer/sink override opts out of batching
-  // and gets the original per-key writes.
+  // sources) are held here and handed to seroval at shell flush, so their
+  // timing and order are the shell's, not each registration's. Each stub is
+  // still its own keyed write: since seroval 1.7 a value that fails to
+  // serialize ends the write it belongs to, and the stubs used to share one
+  // object write, so one async value seroval cannot handle left every other
+  // stub in the shell, `_fr` completion flags included, pending on the
+  // client forever (#4242). A write is the unit seroval isolates.
+  // Document-mode only: a custom serializer or sink addresses records by key
+  // and keeps its own delivery order, so it gets each write as it happens.
   const canBatchStubs = !options.serializer && !options.sink;
   let stubBatch = null;
-  const STUB_BATCH_KEY = "$B";
   // Async mode (the thenable: the whole document resolves at once) has no
   // reader before completion, so nothing is gained by handing seroval a
   // value as it arrives — and handing it over in arrival order makes the
@@ -2321,21 +2319,10 @@ export function renderToStream(code, options = {}) {
   };
   const flushStubBatch = () => {
     if (!stubBatch) return;
-    const batch = stubBatch;
+    const entries = [...stubBatch];
     stubBatch = null;
-    if (batch.size === 1) {
-      const [id, p] = batch.entries().next().value;
-      serializer.write(id, p);
-      return;
-    }
-    const obj = {};
-    const entries = [...batch];
     if (stableOrder) entries.sort(byKey);
-    for (const [id, p] of entries) obj[id] = p;
-    serializer.write(STUB_BATCH_KEY, obj);
-    pushTask(
-      `(b=>{for(var k in b)_$HY.r[k]=b[k];delete _$HY.r["${STUB_BATCH_KEY}"]})(_$HY.r["${STUB_BATCH_KEY}"])`
-    );
+    for (let i = 0; i < entries.length; i++) serializer.write(entries[i][0], entries[i][1]);
   };
   let headerEmitted = false;
   const pushTask = task => {
@@ -2402,6 +2389,10 @@ export function renderToStream(code, options = {}) {
     fragment(key, value, meta) {
       const deferActivation = !!meta.revealGroup;
       const styles = meta.styles;
+      // A rejected fragment's template is marked: its swap lists the nodes
+      // it inserts in the reveal record (`_$HY.v`), for a client boundary
+      // that renders the failure fresh to clear first (#4287).
+      const tpl = `<template id="${key}"${meta.error ? " e" : ""}>${value}</template>`;
       for (let i = 0; i < styles.inline.length; i++) {
         buffer.write(renderInlineStyle(styles.inline[i], nonce));
       }
@@ -2416,7 +2407,7 @@ export function renderToStream(code, options = {}) {
         // before the parser reaches anything written after the link, and $dfr
         // reads a missing template as a swap that already ran: the reveal
         // would be dropped and the boundary would stay on its fallback.
-        buffer.write(`<template id="${key}">${value}</template>`);
+        buffer.write(tpl);
         for (const entry of styles.links) {
           buffer.write(
             typeof entry === "string"
@@ -2425,7 +2416,7 @@ export function renderToStream(code, options = {}) {
           );
         }
       } else {
-        buffer.write(`<template id="${key}">${value}</template>`);
+        buffer.write(tpl);
         if (!deferActivation) {
           emitTask(`$df("${key}")`);
         }
@@ -2671,9 +2662,10 @@ export function renderToStream(code, options = {}) {
   // resume loops may be parked on promises that never settle), and pending
   // serialized values under the errored key would gate seroval's onDone the
   // same way. Settle both. Descendant `_fr` stubs resolve clean (not
-  // rejected) and abandoned data ids resolve undefined: the client re-renders
-  // the errored region fresh off the OUTER fragment's rejection, so nothing
-  // consumes these — a rejection would only raise unhandled-rejection noise.
+  // rejected) and abandoned data ids resolve undefined, and are unregistered
+  // on the client: it re-renders the errored region fresh off the OUTER
+  // fragment's rejection, so nothing consumes these — a rejection would only
+  // raise unhandled-rejection noise.
   //
   // A finding (`SSR_SUBTREE_ABANDONED`) when the discard took work with it —
   // nested fragments still rendering, serialized values still pending: the
@@ -2681,22 +2673,38 @@ export function renderToStream(code, options = {}) {
   // request cost wants to know how much was thrown away. A leaf fragment's
   // failure alone is the render error's own finding, not this one.
   const abandonSubtree = (key, error) => {
+    // A boundary created where no owner id was current (inside an async
+    // memo's continuation, #4242) registers under an undefined key. It is
+    // nobody's descendant and has no addressable subtree of its own; reading
+    // its length would turn one fragment's failure into a whole-request one.
+    if (key == null) return;
     let fragments = 0;
     let serialized = 0;
     for (const [k, entry] of registry) {
-      if (k.length > key.length && k.startsWith(key)) {
+      if (k != null && k.length > key.length && k.startsWith(key)) {
         registry.delete(k);
         entry.resolve();
         fragments++;
       }
     }
+    const unregister = [];
     for (const [id, settle] of pendingSerialized) {
       if (id.startsWith(key)) {
         pendingSerialized.delete(id);
         settle();
         serialized++;
+        // Not yet on the wire: never registered. Otherwise the client drops
+        // it (below).
+        if (!stubBatch?.delete(id)) unregister.push(`delete _$HY.r[${JSON.stringify(id)}]`);
       }
     }
+    // The settle above only releases seroval: `undefined` is not the
+    // server's answer. The client renders this subtree fresh, adopting what
+    // the server sent by id, so an abandoned record must not be there to
+    // adopt: unregister it (a document task, ahead of the `_fr` rejection
+    // that triggers the fresh render) and the read computes. A frame sink
+    // has no reader for these records.
+    if (unregister.length && !options.sink) pushTask(unregister.join(";"));
     if ("_SOLID_OBSERVE_" && (fragments || serialized))
       emitFinding(
         {
@@ -3041,14 +3049,20 @@ export function renderToStream(code, options = {}) {
               // outcome — a server <Errored>'s fallback or the boundary's own
               // markup inside a server component (frames-rulings 3.3) — and
               // nothing outside one, where the client twin renders fresh over
-              // the blank.
-              sink.fragment(key, resolveSSRSelectValues(value !== undefined ? value : " "), {
-                styles,
-                revealGroup,
-                error: error
-                  ? ssrSanitizeError(error, null, undefined, undefined, errorScope)
-                  : error
-              });
+              // the blank: an empty template, so what its swap lists is the
+              // outcome alone (the client reads a listed outcome as the
+              // server's answer for the failure, #4287).
+              sink.fragment(
+                key,
+                resolveSSRSelectValues(value !== undefined ? value : error ? "" : " "),
+                {
+                  styles,
+                  revealGroup,
+                  error: error
+                    ? ssrSanitizeError(error, null, undefined, undefined, errorScope)
+                    : error
+                }
+              );
               item.resolve(error);
             }
           }
@@ -3981,9 +3995,16 @@ export function createLiveHoles(sink, scoped, settled, errorScope) {
   // Null when every row changed: the whole hole is then no more to send.
   function rowOps(last, rows) {
     const ops = [];
+    const html = [];
     for (let i = 0; i < rows.length; i++)
-      if (i >= last.length || rows[i] !== last[i]) ops.push([i, rows[i]]);
-    return ops.length < rows.length ? { n: rows.length, r: ops } : null;
+      if (i >= last.length || rows[i] !== last[i]) {
+        const patch = i < last.length ? rowPatch(last[i], rows[i]) : null;
+        ops.push(patch ? ("_SOLID_DEV_" ? [i, patch.p, patch.h] : [i, patch.p]) : [i, rows[i]]);
+        html.push(rows[i]);
+      }
+    if (ops.length >= rows.length) return null;
+    // The changed rows' html, for the sink's digests: never on the wire.
+    return Object.defineProperty({ n: rows.length, r: ops }, ROW_HTML, { value: html });
   }
   // Resolve a hole thunk's value to a `{ t, h, p }` result (`rows` as
   // `resolveValue` returns them). NotReady escalations are absorbed into
@@ -4507,6 +4528,94 @@ function attrNames(text) {
   let m;
   while ((m = re.exec(text))) names.push(m[1]);
   return names;
+}
+
+// Row patches: a changed row whose markup has the same structure as the
+// one the client shows (same tags, same comments, in the same order)
+// travels as the edits between them instead of its html, so the client
+// writes text and attributes in place with no parse and no morph. `p`
+// lists `[el, attrs]` (element `el`'s whole attribute area, `el` counting
+// the row's elements in document order) and `[el, slot, text]` (the text
+// run before the `slot`-th non-text child of `el`, -1 the row itself);
+// In dev, `h` hashes the row's element tree (each element's tag and its
+// parent's ordinal): the client hashes the row it shows the same way and
+// reports a mismatch instead of writing, since a parser fix-up (foster
+// parenting, an implied close) can give the DOM a shape the strings don't
+// have. The compiler rejects such markup in DOM templates, but server
+// components compile only for SSR, and nesting across components is never
+// one template. Null
+// when the structure differs or a text run carries an entity this
+// decoder doesn't know; the row then ships whole. Shares `rowShape` with
+// the client (wire-tier.ts), which must hash identically.
+const ROW_HTML = Symbol.for("solid.rowHtml");
+const ROW_TOKEN = /<(\/?)([a-zA-Z][^\s/>]*)((?:[^>"']|"[^"]*"|'[^']*')*)>|<!--([\s\S]*?)-->/g;
+const ROW_VOID = /^(?:area|base|br|col|embed|hr|img|input|link|meta|source|track|wbr)$/i;
+const ROW_FOREIGN = /^(?:svg|math)$/i;
+const ROW_RAW = /^(?:script|style|textarea|title|template)$/i;
+// An element's `$key` (compiled to `_key`): a changed key is another entity.
+const ROW_KEY = /\s_key(?:="[^"]*")?(?![^\s/])/;
+const rowKey = attrs => (ROW_KEY.exec(attrs) || [""])[0];
+const ROW_ENTITY = /&(?:amp|lt|gt|quot|#39);/g;
+const ROW_ENTITIES = { "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'" };
+function rowText(text) {
+  if (!text.includes("&")) return text;
+  if (text.replace(ROW_ENTITY, "").includes("&")) return null;
+  return text.replace(ROW_ENTITY, e => ROW_ENTITIES[e]);
+}
+const ROW_HASH_SEED = 0x811c9dc5;
+function rowShape(h, tag, parent) {
+  for (let i = 0; i < tag.length; i++) h = Math.imul(h ^ (tag.charCodeAt(i) | 32), 16777619);
+  return Math.imul(h ^ (parent + 2), 16777619);
+}
+function rowPatch(a, b) {
+  const ra = new RegExp(ROW_TOKEN);
+  const rb = new RegExp(ROW_TOKEN);
+  const p = [];
+  // Open elements: [ordinal, non-text children so far, inside SVG/MathML];
+  // the row is -1.
+  const stack: [number, number, boolean][] = [[-1, 0, false]];
+  let el = -1;
+  let h = ROW_HASH_SEED;
+  let ia = 0;
+  let ib = 0;
+  for (;;) {
+    const ma = ra.exec(a);
+    const mb = rb.exec(b);
+    const ta = a.slice(ia, ma ? ma.index : a.length);
+    const tb = b.slice(ib, mb ? mb.index : b.length);
+    const top = stack[stack.length - 1];
+    if (ta !== tb) {
+      const text = rowText(tb);
+      if (text === null) return null;
+      p.push([top[0], top[1], text]);
+    }
+    if (!ma || !mb) return !ma && !mb ? { p, h: h >>> 0 } : null;
+    ia = ra.lastIndex;
+    ib = rb.lastIndex;
+    if (ma[4] !== undefined || mb[4] !== undefined) {
+      if (ma[4] !== mb[4]) return null;
+      top[1]++;
+    } else if (ma[1] !== mb[1] || ma[2] !== mb[2]) return null;
+    else if (ROW_RAW.test(ma[2])) return null;
+    else if (ma[1]) {
+      if (stack.length === 1) return null;
+      stack.pop();
+    } else {
+      el++;
+      if ("_SOLID_DEV_") h = rowShape(h, ma[2], top[0]);
+      top[1]++;
+      const foreign = top[2] || ROW_FOREIGN.test(ma[2]);
+      if (ma[3] !== mb[3]) {
+        // SVG and MathML attribute names are case-sensitive; the client
+        // folds names as the HTML parser does, so those rows ship whole.
+        // So does an element whose `$key` changed: the morph replaces it
+        // instead of carrying its live state (value, open, focus) over.
+        if (foreign || rowKey(ma[3]) !== rowKey(mb[3])) return null;
+        p.push([el, mb[3].replace(/\/$/, "")]);
+      }
+      if (!ROW_VOID.test(ma[2]) && !ma[3].endsWith("/")) stack.push([el, 0, foreign]);
+    }
+  }
 }
 
 export function ssr(template: string[] | string, ...nodes: any[]): { t: string };

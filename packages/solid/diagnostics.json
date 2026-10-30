@@ -18,6 +18,15 @@
     "guideUrl": "https://v2.solidjs.com/reference/solid-js/diagnostics/action-called-in-owned-scope"
   },
   {
+    "code": "ASYNC_MEMO_ELEMENT",
+    "kind": ["ssr"],
+    "severity": ["error"],
+    "category": "ssr",
+    "trigger": "An async memo landed on rendered output (JSX, a boundary), which cannot serialize for hydration; the memo rejects (observe + dev; rejects in every tier)",
+    "repair": "An async memo (or async iterable source) resolved, on the server, to rendered output — JSX, a component's result, a `<Loading>`/`<Errored>` boundary.",
+    "guideUrl": "https://v2.solidjs.com/reference/solid-js/diagnostics/async-memo-element"
+  },
+  {
     "code": "ASYNC_OUTSIDE_LOADING_BOUNDARY",
     "kind": ["async"],
     "severity": ["warn"],
@@ -225,6 +234,15 @@
     "guideUrl": "https://v2.solidjs.com/reference/solid-js/diagnostics/lazy-asset-unmapped"
   },
   {
+    "code": "LOADING_ON_ACCESSOR",
+    "kind": ["async"],
+    "severity": ["warn"],
+    "category": "async",
+    "trigger": "`<Loading on>` received a function (an accessor) instead of the dependency's value; it is never called, so the boundary never re-arms",
+    "repair": "A Loading boundary's `on` received a function, such as `on={route}` or `on={() => route()}`.",
+    "guideUrl": "https://v2.solidjs.com/reference/solid-js/diagnostics/loading-on-accessor"
+  },
+  {
     "code": "LOADING_ON_OUTSIDE_HOLD",
     "kind": ["async"],
     "severity": ["warn"],
@@ -286,6 +304,15 @@
     "trigger": "Effect created without reactive owner",
     "repair": "An effect was created outside any reactive context (no root, no component).",
     "guideUrl": "https://v2.solidjs.com/reference/solid-js/diagnostics/no-owner-effect"
+  },
+  {
+    "code": "ON_FLUSH_IN_OWNED_SCOPE",
+    "kind": ["lifecycle"],
+    "severity": ["warn"],
+    "category": "lifecycle",
+    "trigger": "`onFlush` called in a component body or computation (meant for event handlers and effect callbacks)",
+    "repair": "`onFlush` was called in a component body or a computation; it is meant for event handlers and effect callbacks.",
+    "guideUrl": "https://v2.solidjs.com/reference/solid-js/diagnostics/on-flush-in-owned-scope"
   },
   {
     "code": "OPTIMISTIC_REVERTED",

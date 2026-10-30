@@ -1,3 +1,4 @@
+import { markCopyRooted } from "./copies.js";
 import {
   CONFIG_AUTO_DISPOSE,
   CONFIG_CHILDREN_FORBIDDEN,
@@ -29,7 +30,7 @@ import {
 } from "./dev.js";
 import { clearDeps, unobserved } from "./graph.js";
 import { deleteFromHeap } from "./heap.js";
-import { dirtyQueue, globalQueue, schedule } from "./scheduler.js";
+import { dirtyQueue, globalQueue, pendingNodes, schedule } from "./scheduler.js";
 import type { Computed, Disposable, Owner, Root } from "./types.js";
 
 // L2 (step 2): the parked frame. A pass parks the previous frame's children
@@ -111,11 +112,13 @@ export function disposeChildren(node: Owner, self: boolean = false, zombie?: boo
     // A death that can unblock the future (L2, `futureBlocked`): a held
     // flight's — a transaction's or a lane's (its `_x._transaction`) — or a
     // stale reader's (REACTIVE_FRAME_READ — a frame that derived from one).
+    // An idle pending queue would also pin it until an unrelated flush.
     // Nothing else re-examines a dead node, so make sure a seam comes.
     if (
       ((node as Computed<unknown>)._statusFlags & STATUS_PENDING &&
         (node as Computed<unknown>)._x?._transaction != null) ||
-      flags & REACTIVE_FRAME_READ
+      flags & REACTIVE_FRAME_READ ||
+      pendingNodes.length
     )
       schedule();
   }
@@ -481,6 +484,7 @@ export function createRoot<T>(
   options?: { id?: string; transparent?: boolean }
 ): T {
   const owner = createOwner(options);
+  if (__DEV__) markCopyRooted();
   // A bound function, not an arrow: an arrow would share this scope, which
   // holds `init`, so keeping `dispose` would keep `init` and all it closes
   // over alive (#4095).

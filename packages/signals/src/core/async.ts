@@ -1,9 +1,11 @@
 import {
+  CONFIG_ASYNC,
   CONFIG_AUTO_DISPOSE,
   CONFIG_REDERIVE,
   CONFIG_GUESS,
   CONFIG_OVERRIDE,
   CONFIG_HELD,
+  CONFIG_INPUTS_PUBLISHED,
   CONFIG_STAGED,
   CONFIG_STAGED_ERROR,
   CONFIG_SYNC,
@@ -12,13 +14,16 @@ import {
   EFFECT_USER,
   NOT_PENDING,
   REACTIVE_DIRTY,
+  REACTIVE_WINDOW,
   REACTIVE_DISPOSED,
   REACTIVE_RECOMPUTING_DEPS,
+  REACTIVE_REASK,
   REACTIVE_STAGED_READ,
   REACTIVE_ZOMBIE,
   STATUS_ERROR,
   STATUS_PENDING,
   STATUS_UNINITIALIZED,
+  STATUS_NO_VALUE,
   NewSet
 } from "./constants.js";
 import { attrHooks } from "./attribution-hooks.js";
@@ -42,6 +47,8 @@ import {
   schedule,
   txOf,
   freshHook,
+  holdWorkHook,
+  guessing,
   laneStageHook
 } from "./scheduler.js";
 import type { Computed, Link, Owner } from "./types.js";
@@ -57,7 +64,7 @@ export function addPendingSource(el: Computed<any>, source: Computed<any>): bool
   return true;
 }
 
-function removePendingSource(el: Computed<any>, source: Computed<any>): boolean {
+export function removePendingSource(el: Computed<any>, source: Computed<any>): boolean {
   const sources = el._x?._pendingSources;
   if (!sources?.delete(source)) return false;
   if (!sources.size) el._x!._pendingSources = undefined;
@@ -310,8 +317,9 @@ export function settlePendingSource(el: Computed<any>, source: Computed<any> = e
       // A19: a verdict reader holds no pending of its own (it was re-derived
       // when the source went pending, `propagateStatus`), and a landing
       // equal to the committed value notifies nobody — the source settling
-      // is its verdict changing: it runs again.
-      return node._config & CONFIG_VERDICT && enqueueSub(node);
+      // is its verdict changing: it runs again. (Verdict readers exist only
+      // with the verdict engine installed.)
+      return holdWorkHook && node._config & CONFIG_VERDICT && enqueueSub(node);
     visited.add(node);
     node._time = clock;
     const remaining = node._x?._pendingSources?.values().next().value;
@@ -423,7 +431,10 @@ export function handleAsync<T>(
   }
 
   if (!thenable && !iterator) {
-    if (el._x !== null) el._x._inFlight = null;
+    if (el._x !== null) {
+      el._x._inFlight = null;
+      if (holdWorkHook) el._config &= ~CONFIG_ASYNC;
+    }
     // A sync landing is the first real answer for a loadingValue node.
     el._loading = false;
     return result as T;
@@ -458,6 +469,11 @@ export function handleAsync<T>(
   // fired _flightTeardown. A future non-recompute registration path must
   // release it here before overwriting _inFlight.
   ext(el)._inFlight = result as PromiseLike<T> | AsyncIterable<T>;
+  // D-25 (verdict.ts `holdWork`): an async memo whose answering pass opened
+  // no verdict window of its own (`markVerdictReader` clears the bit).
+  // Kept by the verdict engine alone (`holdWorkHook`): a build without it
+  // folds the bit's upkeep away.
+  if (holdWorkHook && !(el._flags & REACTIVE_WINDOW)) el._config |= CONFIG_ASYNC;
   // The question this flight answers (A18 provenance, lanes.ts): the action
   // whose slice asked it; mainline is always the current question.
   el._x!._q = question || MAINLINE_QUESTION;
@@ -552,8 +568,14 @@ export function handleAsync<T>(
         return;
       }
       // A store derive's landing commits through its setter: unheld, the
-      // shown error leaves now; held, at the derive's commit.
-      if (!(el._config & CONFIG_HELD)) el._x!._shownError = undefined;
+      // shown error leaves now, and so does a commit-beneath-a-flight's
+      // CONFIG_INPUTS_PUBLISHED (its first flight's, #4269) — left standing,
+      // a verdict reader of the next flight would suspend instead of being
+      // served the screen; held, both at the derive's commit.
+      if (!(el._config & CONFIG_HELD)) {
+        el._x!._shownError = null;
+        el._config &= ~CONFIG_INPUTS_PUBLISHED;
+      }
       if (wasUninitialized) landStatus(el, true);
       // Attribution hook: this path landed through the setter (derived
       // stores, projections), which does not go through setSignal, so the
@@ -888,7 +910,7 @@ function landStatus(el: Computed<any>, clearUninitialized: boolean = false): voi
   } else clearStatus(el, clearUninitialized);
 }
 
-export function notifyStatus(el: Computed<any>, status: number, error: any): void {
+export function notifyStatus(el: Computed<any>, status: number, error?: any): void {
   // Wrap regular errors to track source node
   if (
     status === STATUS_ERROR &&
@@ -897,22 +919,35 @@ export function notifyStatus(el: Computed<any>, status: number, error: any): voi
   )
     error = new StatusError(el, error);
 
-  const pendingSource =
-    status === STATUS_PENDING && error instanceof NotReadyError ? error.source : undefined;
+  const pendingSource = status === STATUS_PENDING && error instanceof NotReadyError && error.source;
   // (CARVE 2: the lane assignment went with the engine.)
 
   if (status === STATUS_PENDING && pendingSource) {
     // D-41: a re-ask of a shown error keeps it the display (`_shownError`).
     if (el._statusFlags & STATUS_ERROR) el._x!._shownError = el._x!._error;
     addPendingSource(el, pendingSource);
-    el._statusFlags = STATUS_PENDING | (el._statusFlags & STATUS_UNINITIALIZED);
+    // A re-ask of an error that answered the first read: still no value.
+    el._statusFlags =
+      STATUS_PENDING |
+      (el._statusFlags & STATUS_NO_VALUE
+        ? STATUS_UNINITIALIZED
+        : el._statusFlags & STATUS_UNINITIALIZED);
     // Preserve the current source on this propagation so readers park on
     // the distinct pending source.
     setPendingError(el, pendingSource, error);
   } else {
     clearPendingSources(el);
+    // An error answering a node with no value marks it so; a re-ask of it
+    // (pending) is uninitialized again; a write (STATUS_NONE) gives it one.
     el._statusFlags =
-      status | (status !== STATUS_ERROR ? el._statusFlags & STATUS_UNINITIALIZED : 0);
+      status |
+      (status === STATUS_ERROR
+        ? el._statusFlags & (STATUS_UNINITIALIZED | STATUS_NO_VALUE)
+          ? STATUS_NO_VALUE
+          : 0
+        : status === STATUS_PENDING && el._statusFlags & STATUS_NO_VALUE
+          ? STATUS_UNINITIALIZED
+          : el._statusFlags & STATUS_UNINITIALIZED);
     ext(el)._error = error;
   }
 
@@ -921,9 +956,14 @@ export function notifyStatus(el: Computed<any>, status: number, error: any): voi
   // status, not its readers': they read the guess. The flight is the parent
   // transition's to wait on — the frame it was asked in holds (A17: "a
   // transition whose optimistic node is still pending on its own fetch is
-  // not complete"), through the node itself (`blocked`).
-  if (status === STATUS_PENDING && el._config & CONFIG_GUESS) {
-    if (passLane === null) joinFuture(null);
+  // not complete"), through the node itself (`blocked`). An input changed
+  // from outside the guess's hold asks a new question: the frame that
+  // changed it is held with that hold (D-34, #4336) — it shows beside the
+  // guess's truth, which reveals at that hold's commit (F-1). A `refresh()`
+  // re-asks the same question: its frame is its own.
+  // (No guess written, no arm.)
+  if (guessing && status === STATUS_PENDING && el._config & CONFIG_GUESS) {
+    if (passLane === null) joinFuture(el._flags & REACTIVE_REASK ? null : txOf(el)._parent);
     return;
   }
 
@@ -941,8 +981,7 @@ export function notifyStatus(el: Computed<any>, status: number, error: any): voi
  * propagates the derive's status from each leaf to the leaf's readers
  * (store/projection.ts `wakeFamily`), exactly as a memo's would reach its. */
 export function propagateStatus(el: Computed<any>, status: number, error: any): void {
-  const pendingSource =
-    status === STATUS_PENDING && error instanceof NotReadyError ? error.source : undefined;
+  const pendingSource = status === STATUS_PENDING && error instanceof NotReadyError && error.source;
   forEachDependent(el, (sub, link) => {
     independentHooks?._cause(el, sub);
     sub._time = clock;
@@ -965,8 +1004,15 @@ export function propagateStatus(el: Computed<any>, status: number, error: any): 
     // Inheriting the error would make a probe's reader errored. A boundary's
     // output (CONFIG_REDERIVE, boundaries.ts) the same: content or fallback
     // is its pass's call.
+    // Not one D-25 makes the hold's work (verdict.ts `holdWork`): an async
+    // memo with no verdict window of its own reads a verdict memo's value,
+    // and that source going pending changes none of its reads — re-derived,
+    // it is served the committed value it already derived from (A10) and
+    // asks that question again. It waits on the source like any derivation
+    // (F-9), and asks its next question once, at the landing (#4397).
     if (
-      sub._config & (CONFIG_REDERIVE | CONFIG_VERDICT) ||
+      sub._config & CONFIG_REDERIVE ||
+      (holdWorkHook && sub._config & CONFIG_VERDICT && !(pendingSource && holdWorkHook(sub, el))) ||
       (status === STATUS_PENDING && link._gen !== sub._depGen)
     ) {
       enqueueSub(sub);
@@ -1015,6 +1061,9 @@ export function propagateStatus(el: Computed<any>, status: number, error: any): 
           joinFuture(txOf(sub));
       }
       notifyStatus(sub, status, error);
+      // A derived store's derive (store/projection.ts): marked, not re-run —
+      // its leaves' readers are not its dependents, so the family walks them.
+      (sub as any).fam?.st(status);
     }
   });
 }

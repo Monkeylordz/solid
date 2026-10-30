@@ -39,6 +39,7 @@ export {
   omit,
   onCleanup,
   onSettled,
+  onFlush,
   latest,
   reconcile,
   refresh,

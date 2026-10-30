@@ -1480,10 +1480,14 @@ export function installHydrationRuntime() {
     // loose text positionally — elements recover through the registry, text
     // only has position. The region is `parent`'s children, or for
     // marker-bounded holes the nodes back to the matching `<!--$-->` start.
+    // A sole primitive (text the claim kept raw: a `<Loading>`'s string or
+    // number fallback, `0` included; only a markerless hole holds one)
+    // tracks no node, so it cannot tell a swap happened: the region is
+    // re-claimed (#4374).
     reclaimRegion(current, parent, marker) {
-      if (!sharedConfig.hydrating || !current || !parent.isConnected) return current;
+      if (!sharedConfig.hydrating || current == null || !parent.isConnected) return current;
       const first = Array.isArray(current) ? current[0] : current;
-      if (!first || !first.nodeType || first.isConnected) return current;
+      if (first == null || first.isConnected) return current;
       let nodes;
       if (marker) {
         nodes = [];
@@ -2234,10 +2238,12 @@ function gateHeadResource(props) {
       // errored) sheet must acquire synchronously — cached sheets add zero
       // wait, adopted server-emitted sheets never stall — and even a
       // settled promise costs a microtask through the async machinery.
-      // Hydrating content is already visible; the server gated its reveal.
+      // Claimed content is already visible; the server gated its reveal. A
+      // fresh render under hydration (a rejected fragment's) gates like any
+      // client render.
       if (
         gateable &&
-        !sharedConfig.hydrating &&
+        !isHydrating() &&
         entry.loadState === "pending" &&
         typeof waitAsset === "function"
       )
@@ -2580,20 +2586,22 @@ export function hydrate(code, element, options = {}) {
 export function getNextElement(template?: () => Element): Element;
 
 export function getNextElement(template) {
-  let node,
-    key,
-    hydrating = isHydrating();
-  if (!hydrating || !(node = sharedConfig.registry.get((key = getHydrationKey())))) {
+  // The key is consumed whenever hydration is on, claiming or not: a
+  // rejected fragment's fresh render adopts its server answers by id, and
+  // the server spent one on this element, so ids after it line up.
+  let key = sharedConfig.hydrating && getHydrationKey(),
+    node = isHydrating() && sharedConfig.registry.get(key);
+  if (!node) {
     if (!template) {
       throw new Error(`Hydration Mismatch. Unable to find DOM nodes for hydration key: ${key}`);
     }
     // A key miss during the hydration walk is a real mismatch: fresh renders
-    // (portals, rejected fragments, post-hydration content) all run with the
-    // hydrating flag off, so there is no legitimate way to get here. The
+    // (portals, rejected fragments, post-hydration content) all run outside
+    // the claim, so there is no legitimate way to get here. The
     // detached element returned below keeps the render alive but never lands
     // in the document — without a report that reads as a silently frozen
     // page (solidjs/solid#3000).
-    if ("_SOLID_DEV_" && hydrating) {
+    if ("_SOLID_DEV_" && isHydrating()) {
       hydrationKeyMisses++;
       console.warn(
         `Hydration key miss for "${key}": no server-rendered element carries this key` +
@@ -2751,6 +2759,8 @@ export function runHydrationEvents() {
           for (let i = 0; i < matches.length; i++)
             eventHandler(e, matches[i].container, matches[i].state);
         } else if (matchContainer) eventHandler(e, matchContainer, matchState);
+        // Each replayed event is its own instant, as live (#4285).
+        flush();
       }
       if (sharedConfig.done) {
         sharedConfig.events = _$HY.events = null;
@@ -2969,7 +2979,6 @@ function eventHandler(e, container, state) {
 
   let node = resumeNode || e.target;
   const key = EVENT_KEY + e.type;
-  const oriTarget = e.target;
   const retarget = value =>
     Object.defineProperty(e, "target", {
       configurable: true,
@@ -3034,8 +3043,9 @@ function eventHandler(e, container, state) {
   }
   // fallback for browsers that don't support composedPath
   else walkUpTree();
-  // Mixing portals and shadow dom can lead to a nonstandard target, so reset here.
-  retarget(oriTarget);
+  // Later native listeners (document, window, outer roots) see the real getters.
+  delete e.target;
+  delete e.currentTarget;
 }
 
 function insertExpression(parent, value, current, marker) {
@@ -3130,7 +3140,7 @@ function insertExpression(parent, value, current, marker) {
     } else {
       parent.appendChild(value);
     }
-    if (marker) value[$$SLOT] = marker;
+    if (marker || value[$$SLOT]) value[$$SLOT] = marker || parent;
   } else if (Array.isArray(value)) {
     const currentArray = Array.isArray(current);
     // Commit-time text materialization (normalize left primitives raw): a
@@ -3153,13 +3163,11 @@ function insertExpression(parent, value, current, marker) {
     if (value.length === 0) {
       cleanChildren(parent, current, marker);
     } else if (currentArray) {
-      if (current.length === 0) {
-        appendNodes(parent, value, marker);
-      } else reconcileArrays(parent, current, value, marker);
+      reconcileArrays(parent, current, value, marker);
     } else {
       // Same sole-primitive case: `0` / `NaN` still own a text node (#3571).
       if (current != null) cleanChildren(parent, current);
-      appendNodes(parent, value);
+      reconcileArrays(parent, [], value);
     }
   } else if ("_SOLID_DEV_")
     // The server renderer's code for the same rule (`UNRECOGNIZED_INSERT_VALUE`
@@ -3201,17 +3209,19 @@ function writeSelectValue(node, value) {
     return queueMicrotask(() => (node.value = value)) || (node.value = value);
   }
   node._$v = value;
-  (selectInsert ||= p => {
-    p && p._$v == null && (p = p.parentNode);
-    const v = p && p._$v;
-    if (v == null) return;
-    if (v.map) {
-      const o = [...p.options];
-      for (let i = 0; i < o.length; i++) o[i].selected = v.some(x => x == o[i].value);
-      v.every(x => o.some(el => el.value == x)) && selectChange(p);
-    } else ((p.value = v), p.selectedIndex > -1 && p.value == v && (p._$v = null));
-  })(node);
+  (selectInsert ||= applySelectValue)(node);
   queueMicrotask(() => selectInsert(node));
+}
+// Keep the shared hook outside a per-select closure context.
+function applySelectValue(p) {
+  p && p._$v == null && (p = p.parentNode);
+  const v = p && p._$v;
+  if (v == null) return;
+  if (v.map) {
+    const o = [...p.options];
+    for (let i = 0; i < o.length; i++) o[i].selected = v.some(x => x == o[i].value);
+    v.every(x => o.some(el => el.value == x)) && selectChange(p);
+  } else ((p.value = v), p.selectedIndex > -1 && p.value == v && (p._$v = null));
 }
 
 function normalize(value, current, multi, doNotUnwrap) {
@@ -3259,14 +3269,6 @@ function tagHost(value, host) {
   } else if (value && value.nodeType && value[$$HOST] !== host) {
     value[$$HOST] = host;
     Object.defineProperty(value, "_$host", { get: host, configurable: true });
-  }
-}
-
-function appendNodes(parent, array, marker = null) {
-  for (let i = 0, len = array.length; i < len; i++) {
-    const n = array[i];
-    parent.insertBefore(n, marker);
-    if (marker) n[$$SLOT] = marker;
   }
 }
 
@@ -3326,14 +3328,14 @@ function cleanChildren(parent, current, marker, replacement) {
       const el = current[i];
       if (replacement !== el) {
         const tag = el[$$SLOT];
-        const owns = el.parentNode === parent && (!tag || tag === marker);
+        const owns = el.parentNode === parent && (!tag || tag === (marker || parent));
         if (replacement && !inserted && !i)
           owns ? parent.replaceChild(replacement, el) : parent.insertBefore(replacement, marker);
         else if (owns) el.remove();
       } else inserted = true;
     }
   } else if (replacement) parent.insertBefore(replacement, marker);
-  if (replacement && marker) replacement[$$SLOT] = marker;
+  if (replacement && (marker || replacement[$$SLOT])) replacement[$$SLOT] = marker || parent;
 }
 
 function gatherHydratable(element, root) {

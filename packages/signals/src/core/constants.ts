@@ -68,6 +68,11 @@ export const REACTIVE_SCREEN_READ = 1 << 18;
  * later read of the same pass routed it into a verdict lane — that was not
  * the probe's answer (lanes.ts). Per pass. */
 export const REACTIVE_PROBE_UNANSWERED = 1 << 19;
+/** The pass opened a verdict window of its own (`isPending`/`latest`) — not
+ * only read a verdict memo (F-6, core.ts `read`). An async memo whose pass
+ * did not is D-25's hold work while its flight is up (verdict.ts
+ * `holdWork`). Per pass (1 << 20 is lanes.ts's LEFT_SHOWN). */
+export const REACTIVE_WINDOW = 1 << 21;
 
 // Static configuration bits packed into Owner/Computed/Signal _config.
 export const CONFIG_OWNED_WRITE = 1 << 0;
@@ -200,11 +205,34 @@ export const CONFIG_WIDE = 1 << 26;
  * creation by dev builds only (the observe artifact mangles the option name,
  * as it does `_wide`). */
 export const CONFIG_SUPERSEDES = 1 << 27;
+/** Observe tiers only: the memo `merge()` creates for a function source — a
+ * key bag readers consume key by key, built by the framework (a compiled
+ * component spread) with options no user can reach. The attribution engine's
+ * UNSTABLE_MEMO_OUTPUT skips it: a fresh-but-equal bag is the idiom
+ * (`{...(on() ? { a } : {})}`), and the advice (`equals`) cannot be applied
+ * (#4256). Set through `_extraConfig` by observe builds only. */
+export const CONFIG_KEY_BAG = 1 << 28;
+/** The frame (rule 3, D-3): a render effect (set at creation, as
+ * `EFFECT_RENDER << 23` — keep the two in step), and a boundary's tree and
+ * output (boundaries.ts) — structure between the content and the render
+ * effect that shows it, not a user derivation of the content. Outside a
+ * hold's own flush it reads that hold's values as committed and is
+ * re-derived at its landing, and a re-pass of it publishes mainline: it
+ * joins nothing, so two mounts under one boundary made in separate flushes
+ * keep their holds apart (D-4, S-5 rows 1′–3′, #4283). */
+export const CONFIG_FRAME = 1 << 23;
+/** The node's last answering pass registered a flight: an async memo. Kept
+ * by the verdict engine alone (verdict.ts `holdWork`), which reads it. */
+export const CONFIG_ASYNC = 1 << 29;
 
 export const STATUS_NONE = 0;
 export const STATUS_PENDING = 1 << 0;
 export const STATUS_ERROR = 1 << 1;
 export const STATUS_UNINITIALIZED = 1 << 2;
+/** An error that answered a node's first read (no value has ever landed):
+ * the error, not UNINITIALIZED, is its status while shown, but a re-ask
+ * makes it uninitialized-pending again — it still has no value (#4244). */
+export const STATUS_NO_VALUE = 1 << 3;
 
 /** `catchHook`'s answer when the catcher is a boundary re-armed by
  * `on` (truthy, as any catch): what it collects is its own, not the hold's. */

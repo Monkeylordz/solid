@@ -87,13 +87,14 @@ describe("Error Boundary Hydration", () => {
           () => "children content",
           (err: any) => `fallback: ${err().message}`
         );
-        result = read();
+        result = read;
       },
       { id: "t" }
     );
     flush();
+    // The display settles in the flush after creation (#4273).
 
-    expect(result).toBe("fallback: server error");
+    expect(result()).toBe("fallback: server error");
   });
 
   test("createErrorBoundary passes through when no serialized error", () => {
@@ -131,14 +132,15 @@ describe("Error Boundary Hydration", () => {
             return `fallback: ${err().message}`;
           }
         );
-        result = read();
+        result = read;
       },
       { id: "t" }
     );
     flush();
+    // The display settles in the flush after creation (#4273).
 
     // Initially shows fallback from serialized error
-    expect(result).toBe("fallback: server error");
+    expect(result()).toBe("fallback: server error");
     expect(resetFn).toBeDefined();
 
     // After reset, the real fn should run
@@ -146,6 +148,101 @@ describe("Error Boundary Hydration", () => {
     resetFn!();
     flush();
     expect(read()).toBe("recovered content");
+  });
+
+  test("createErrorBoundary hydrated in its error state recovers when its inputs change (#4273)", () => {
+    startHydration({ t0: new Error("item 4 not found") });
+
+    const [sel, setSel] = coreSignal(4);
+    let read!: () => unknown;
+    createRoot(
+      () => {
+        read = createErrorBoundary(
+          () => {
+            if (sel() === 4) throw new Error(`item ${sel()} not found`);
+            return `item ${sel()}`;
+          },
+          (err: any) => `fallback: ${err().message}`
+        );
+        read();
+      },
+      { id: "t" }
+    );
+    flush();
+    expect(read()).toBe("fallback: item 4 not found");
+
+    stopHydration();
+    flush();
+    expect(read()).toBe("fallback: item 4 not found");
+
+    setSel(3);
+    flush();
+    expect(read()).toBe("item 3");
+  });
+
+  test("createErrorBoundary hydrated from a server error holds the client's own error (#4273)", () => {
+    startHydration({ t0: new Error("server error") });
+
+    let fails = true;
+    const seen: unknown[] = [];
+    let read!: () => unknown;
+    let resetFn!: () => void;
+    createRoot(
+      () => {
+        read = createErrorBoundary(
+          () => {
+            if (fails) throw new Error("client error");
+            return "recovered";
+          },
+          (err: any, reset) => {
+            resetFn = reset;
+            seen.push(err());
+            return `fallback: ${err().message}`;
+          }
+        );
+        read();
+      },
+      { id: "t" }
+    );
+    flush();
+    // The content's own run in the hydration pass throws: the boundary holds
+    // the client error, and the fallback receives it.
+    expect(read()).toBe("fallback: client error");
+    expect((seen[seen.length - 1] as Error).message).toBe("client error");
+
+    // reset() clears the client error.
+    stopHydration();
+    fails = false;
+    resetFn();
+    flush();
+    expect(read()).toBe("recovered");
+  });
+
+  test("createErrorBoundary content that runs clean keeps the server's fallback until the content re-runs (#4273)", () => {
+    startHydration({ t0: new Error("server error") });
+
+    const [label, setLabel] = coreSignal("client");
+    let read!: () => unknown;
+    createRoot(
+      () => {
+        read = createErrorBoundary(
+          () => label(),
+          (err: any) => `fallback: ${err().message}`
+        );
+        read();
+      },
+      { id: "t" }
+    );
+    flush();
+    expect(read()).toBe("fallback: server error");
+
+    stopHydration();
+    flush();
+    expect(read()).toBe("fallback: server error");
+
+    setLabel("changed");
+    flush();
+    expect(read()).toBe("changed");
   });
 
   test("createErrorBoundary handles non-Error serialized values", () => {
@@ -159,13 +256,14 @@ describe("Error Boundary Hydration", () => {
           () => "children content",
           (err: any) => `fallback: ${err()}`
         );
-        result = read();
+        result = read;
       },
       { id: "t" }
     );
     flush();
+    // The display settles in the flush after creation (#4273).
 
-    expect(result).toBe("fallback: string error");
+    expect(result()).toBe("fallback: string error");
   });
 
   test("Errored component reads serialized error during hydration", () => {
@@ -265,13 +363,14 @@ describe("Error Boundary Hydration", () => {
           },
           (err: any) => `outer-fallback: ${err().message}`
         );
-        result = read();
+        result = read;
       },
       { id: "t" }
     );
     flush();
+    // The display settles in the flush after creation (#4273).
 
-    expect(result).toBe("outer-fallback: outer error");
+    expect(result()).toBe("outer-fallback: outer error");
   });
 
   test("ID alignment: boundary after memo during hydration", () => {
@@ -288,16 +387,17 @@ describe("Error Boundary Hydration", () => {
           () => "children",
           (err: any) => `fallback: ${err().message}`
         );
-        boundaryResult = read();
+        boundaryResult = read;
       },
       { id: "t" }
     );
     flush();
+    // The display settles in the flush after creation (#4273).
 
     // Memo should have loaded serialized value 42 (not computed 99)
     expect(memoResult).toBe(42);
     // Boundary should have loaded serialized error
-    expect(boundaryResult).toBe("fallback: boundary error");
+    expect(boundaryResult()).toBe("fallback: boundary error");
   });
 
   test("Errored shows async rejection fallback after Loading resolves during hydration", async () => {
@@ -4597,7 +4697,7 @@ describe("Loading boundary: fragment registration channel (_fr)", () => {
     expect(memo()).toBe(99);
   });
 
-  test("rejected _fr resumes without hydrating serialized children", async () => {
+  test("rejected _fr resumes fresh, adopting serialized children", async () => {
     let rejectFr!: (e: any) => void;
     const frPromise: any = new Promise<boolean>((_, rej) => (rejectFr = rej));
     frPromise.s = 0;
@@ -4639,7 +4739,8 @@ describe("Loading boundary: fragment registration channel (_fr)", () => {
     await new Promise<void>(r => setTimeout(r, 50));
     flush();
 
-    expect(memo()).toBe(0);
+    // Fresh DOM, but the server's answer is used: hydration never refetches.
+    expect(memo()).toBe(7);
   });
 
   test("_fr with assets waits for both fragment and assets", async () => {
@@ -4711,7 +4812,9 @@ describe("Loading boundary: fragment registration channel (_fr)", () => {
     flush();
 
     expect(typeof result).toBe("function");
-    expect(result()).toBe("fallback-sync");
+    // The "$$f" route is a loading boundary whose content waits on the
+    // resume: its accessor serves the hydrated fallback (#4286).
+    expect(result()()).toBe("fallback-sync");
   });
 
   test("_fr channel isolation: sibling boundaries with distinct root IDs", async () => {

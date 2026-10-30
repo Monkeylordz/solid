@@ -201,6 +201,39 @@ let virtual_tsx =
 
 `CompileOptions::default()` uses `module_name: "@solidjs/web"` and the same control-flow `built_ins` as the Babel plugin. Build with `--no-default-features` when embedding without the Node-API adapter.
 
+A frontend that builds its own Oxc AST instead of source text hands the program to `compile_program`, which runs the same back ends `compile` reaches after parsing. The program must be allocated in the allocator passed beside it, and `source` must be its `source_text`: the authored text its spans index, so source maps and diagnostics land on authored positions (keep authored spans on carried-over nodes and leave synthesized nodes at `SPAN`). The caller must build against the same Oxc release as this crate.
+
+```rust
+use oxc_allocator::Allocator;
+use solidjs_compiler::{compile_program, CompileOptions};
+
+let allocator = Allocator::default();
+let program = my_frontend::lower(&allocator, authored_source)?; // oxc_ast::ast::Program
+let output = compile_program(&allocator, program, authored_source, &CompileOptions::default())?;
+```
+
+TSRX's scoped-CSS engine is exported as `solidjs_compiler::style` for other frontends, in every build (it does not need the `tsrx` feature). It has no dependency on TSRX syntax or Oxc: describe the elements a `<style>` block governs as `Element` values, and `compile_style` returns the scoped stylesheet, its hash, the class map and the ids of the elements to annotate, the same bytes a `.tsrx` file with that stylesheet at that `StyleLocation` gets.
+
+```rust
+use solidjs_compiler::style::{compile_style, Element, ElementKind, StyleInput, StyleKind, StyleLocation};
+
+let elements = [Element {
+    id: 1,
+    kind: ElementKind::Native("div".into()),
+    attributes: Vec::new(),
+    has_spread: false,
+    children: Vec::new(),
+}];
+let output = compile_style(StyleInput {
+    css: "div { color: red }",
+    location: StyleLocation { filename: "view.rx", line: 3, column: 4 },
+    elements: &elements,
+    kind: StyleKind::Block,
+    minify: false,
+})?;
+// output.css, output.hash, output.class_map, output.scoped_elements
+```
+
 The unstable Rust typecheck projection reports embedded ranges in authored UTF-8 bytes. The N-API adapter converts those ranges to UTF-16 code units for JavaScript tooling.
 
 > **Stability:** the Rust API is unstable while the compiler is pre-1.0. Options, output, and error types may change in any release — pin an exact revision when embedding it.

@@ -60,6 +60,8 @@ pub(crate) struct AstSsrTransform<'a, 'source> {
     /// The memo wrapper import name; `None` disables memo wrapping.
     memo_wrapper: Option<String>,
     static_marker: String,
+    /// The `validate` option: malformed template markup is a compile error.
+    validate: bool,
     uses_ssr: bool,
     uses_create_component: bool,
     uses_ssr_hydration_key: bool,
@@ -137,6 +139,8 @@ pub(crate) struct AstSsrTransform<'a, 'source> {
     /// Native elements marked pass-through by `escapeExpression` (Babel's
     /// `wontEscape`), identified by span.
     wont_escape_spans: std::vec::Vec<Span>,
+    /// Native children of a spread raw-text element, whose templates keep their characters.
+    raw_text_spans: std::vec::Vec<Span>,
     /// Span of the JSX root currently being lowered via the visitor entry.
     /// Babel keeps a raw `this` in the tag callee of the root element of each
     /// `transformJSX` call; only descendants use the `_self$` capture.
@@ -234,6 +238,7 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
         location_base: Option<String>,
         memo_wrapper: Option<String>,
         static_marker: String,
+        validate: bool,
         built_ins: std::vec::Vec<String>,
     ) -> Self {
         Self {
@@ -248,6 +253,7 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
             location_base,
             memo_wrapper,
             static_marker,
+            validate,
             uses_ssr: false,
             uses_create_component: false,
             uses_ssr_hydration_key: false,
@@ -294,6 +300,7 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
             component_child_depth: 0,
             var_scope_stack: std::vec::Vec::new(),
             wont_escape_spans: std::vec::Vec::new(),
+            raw_text_spans: std::vec::Vec::new(),
             jsx_root_span: None,
             deferring: false,
             iife_callee_addrs: std::vec::Vec::new(),
@@ -689,16 +696,26 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
     /// by content, and returns the `_tmpl$N` local (Babel's `templates`
     /// program-scope data).
     fn register_template(&mut self, parts: &[String]) -> String {
+        let parts = crate::shared::utils::ascii_template_parts(parts);
+        self.register_template_parts(parts)
+    }
+
+    /// `register_template` for a spread raw-text element's child, left as written.
+    fn register_raw_template(&mut self, parts: &[String]) -> String {
+        self.register_template_parts(std::borrow::Cow::Borrowed(parts))
+    }
+
+    fn register_template_parts(&mut self, parts: std::borrow::Cow<'_, [String]>) -> String {
         if let Some((_, name)) = self
             .templates
             .iter()
-            .find(|(existing, _)| existing == parts)
+            .find(|(existing, _)| existing[..] == parts[..])
         {
             return name.clone();
         }
         let name =
             crate::shared::utils::next_unique_template_id(&mut self.template_index, &self.bindings);
-        self.templates.push((parts.to_vec(), name.clone()));
+        self.templates.push((parts.into_owned(), name.clone()));
         name
     }
 
@@ -878,7 +895,41 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
     ) -> Result<Expression<'a>> {
         let span = element.span;
         let wont_escape = self.wont_escape_spans.contains(&element.span);
-        let template_local = self.register_template(&template.parts);
+        // The DOM `validate` pass (#3099) over the SSR markup, so templates
+        // that only ever compile for the server (server components) are
+        // checked too. Content holes are opaque — under an `<html>` root one
+        // may render the `<head>`/`<body>`, so those shells are skipped.
+        if self.validate {
+            let (mut html, content_holes) = template.validation_markup();
+            // Like the DOM compile, a template rooted at an SVG/MathML element
+            // (`<g>`, `<image>`, …) is parsed under its owner tag: it renders
+            // inside an `<svg>`/`<math>` of an enclosing template (#4241).
+            if let Some(wrapper) = element_name(&element.opening_element.name)
+                .ok()
+                .and_then(|tag_name| crate::dom::element::xml_wrapper_tag(element, &tag_name))
+            {
+                html = format!("<{wrapper}>{html}</{wrapper}>");
+            }
+            let shell_with_holes = content_holes && html.starts_with("<html>");
+            if let Some(result) = (!shell_with_holes)
+                .then(|| crate::shared::validate::is_invalid_markup(&html))
+                .flatten()
+            {
+                let (line, column) = crate::dom::template::line_and_column(self.source, span.start);
+                return Err(Error::transform(format!(
+                    "The HTML provided is malformed and will yield unexpected output when evaluated by a browser. ({line}:{column})\n\
+                     User HTML:\n {}\n\
+                     Browser HTML:\n {}\n\
+                     Original HTML:\n {}",
+                    result.html, result.browser, html
+                )));
+            }
+        }
+        let template_local = if self.raw_text_spans.contains(&element.span) {
+            self.register_raw_template(&template.parts)
+        } else {
+            self.register_template(&template.parts)
+        };
         // A pass-through element (already inside `_$escape`) with a static
         // template needs no `ssr()` wrapper — the raw HTML template reference
         // suffices (Babel returns the `_tmpl$` id directly).
@@ -1651,7 +1702,14 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
         if let (Some(JSXAttributeItem::SpreadAttribute(spread)), None) =
             (prop_attributes.next(), prop_attributes.next())
         {
-            return Ok((spread.argument.clone_in(self.allocator), None));
+            // A lone dynamic spread defers behind a thunk too (#4240): see
+            // the source loop below. `ssrElement` calls a function props
+            // argument after allocating the key.
+            let argument = spread.argument.clone_in(self.allocator);
+            if self.classify().is_dynamic(None, &argument, false) {
+                return Ok((self.inline_call_expression(argument), None));
+            }
+            return Ok((argument, None));
         }
         let last_spread = attributes
             .iter()
@@ -1878,6 +1936,9 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
                     // Nested natives render their own template/ssrElement —
                     // no escaping or markers (Babel: `child.exprs` is empty
                     // for templates, `spreadElement` skips both).
+                    if crate::shared::utils::raw_text_close(tag_name).is_some() {
+                        self.raw_text_spans.push(child_element.span);
+                    }
                     nodes.push(self.lower_element_impl(child_element, false)?);
                 }
                 JSXChild::ExpressionContainer(container) => {
@@ -1895,7 +1956,11 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
                         if text.is_empty() {
                             continue;
                         }
-                        let local = self.register_template(std::slice::from_ref(&text));
+                        let local = if crate::shared::utils::raw_text_close(tag_name).is_some() {
+                            self.register_raw_template(std::slice::from_ref(&text))
+                        } else {
+                            self.register_template(std::slice::from_ref(&text))
+                        };
                         self.uses_ssr = true;
                         nodes.push(self.ssr_call(container.span, &local, 1, std::vec::Vec::new()));
                         continue;
@@ -2841,11 +2906,14 @@ impl<'a, 'source> AstSsrTransform<'a, 'source> {
             marker_static,
             can_allocate_ids,
         } = children;
+        let inner_html = do_not_escape;
         let do_not_escape = do_not_escape || element_do_not_escape;
         // Literal after folding — Babel's `getStaticExpression` text path.
         match &value {
             Expression::StringLiteral(literal) => {
-                if do_not_escape {
+                if inner_html {
+                    template.push_opaque(&literal.value);
+                } else if do_not_escape {
                     let text = literal.value.to_string();
                     template.current_mut().push_str(&text);
                 } else {
@@ -3824,7 +3892,9 @@ impl<'a> AstSsrTransform<'a, '_> {
             }
             Some(JSXAttributeValue::Element(_) | JSXAttributeValue::Fragment(_)) => return None,
         }
-        Some(TailPart::Text(markup))
+        Some(TailPart::Text(
+            crate::shared::utils::ascii_attribute_markup(markup),
+        ))
     }
 
     /// The attribute-string argument for a tail: a string literal when every

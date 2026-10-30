@@ -269,6 +269,8 @@ const user = createMemo(() => {
 // `Promise.resolve(value)` inside the compute is the fake too, and never settles either.
 ```
 
+A cached dynamic `import()` hangs the same way ([#4332](https://github.com/solidjs/solid/issues/4332)). In a Vite build every `import()` goes through `__vitePreload`, which starts from `Promise.resolve()` read off the global at call time, so the module promise stored in a de-duplication map during the tracking run is the fake. The memo itself hydrates from the server's value, so the page looks right; the next caller that hits the map (a later mount, a navigation) waits forever and no request for the chunk is made. Use `lazy()` for components (it already refuses to cache a load made during a trace), and keep a module cache out of hydrated computes or apply the rule below.
+
 The rule for a cache seeded from hydration data: while `isHydrating()` (`solid-js`) is true, treat the seeded value as fresh, and do not populate the cache by running the fetcher. To wrap a hydrated value in a real promise, capture the constructor at module load. The fakes only replace the global inside the window.
 
 ```js
@@ -356,6 +358,16 @@ navigate(`/todos/${todos.at(-1).id}`);
 The promise is safe to ignore — fire-and-forget `refresh()` is unchanged, and a failed refetch never surfaces an unhandled rejection from an ignored promise. The semantics are quiescence, not flight identity: if a second refresh (or any invalidation) supersedes this one mid-flight, the promise waits for — and delivers — whatever finally lands. A failed re-ask rejects with the error. Awaiting does not change the quiet-re-ask contract: `isPending` still stays `false` for a bare refresh.
 
 Refresh granularity is the granularity of the _derive function_: there is no per-path refetch to re-run, so refresh a derived store by passing its root (`refresh(todos)`, not `refresh(todos.items[0])`) — that re-asks the whole projection, and reads through any nested node after the `await` are fresh. Inside actions, `yield refresh(x)` is the mutate-then-refetch sequencing primitive — see RFC 06.
+
+Inside an action, call `refresh(x)` from the generator. It doesn't need a `yield` unless the action needs the fresh value. Don't call it after an `await`, including inside an async helper the action yields: that code runs outside the action's transaction, like any write there. Awaiting it there also hangs. The waiter waits for the action's commit, and the commit waits for the helper. So it works until `x` happens to re-run during the action, and then it hangs:
+
+```js
+const like = action(function* () {
+  setLikes(likes() + 1);
+  yield saveLike(); // async helper: no refresh() inside it
+  refresh(post); // in the generator; `yield refresh(post)` only to wait for the fresh value
+});
+```
 
 #### `resource.mutate` → `createOptimisticStore` / `action`
 

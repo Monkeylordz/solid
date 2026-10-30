@@ -130,6 +130,13 @@ export function hasStaticMarker(
     return hasStaticMarker(object.expression as StaticMarkerNode, path);
 }
 
+/** `import()`: an `ImportExpression` on Babel 8 (and 7 with
+ * `createImportExpressions`), a `CallExpression` with an `Import` callee
+ * otherwise. Checked by type so older `@babel/types` builds still match. */
+export function isImportExpression(node: t.Node): boolean {
+  return node.type === ("ImportExpression" as t.Node["type"]);
+}
+
 export function isDynamic(
   path: NodePath,
   { checkMember, checkTags, checkCallExpressions = true }: DynamicOptions
@@ -149,7 +156,8 @@ export function isDynamic(
     checkCallExpressions &&
     (t.isCallExpression(expr) ||
       t.isOptionalCallExpression(expr) ||
-      t.isTaggedTemplateExpression(expr))
+      t.isTaggedTemplateExpression(expr) ||
+      isImportExpression(expr))
   ) {
     return true;
   }
@@ -192,6 +200,11 @@ export function isDynamic(
 
   let dynamic: boolean | undefined;
   const visitor: Visitor = {
+    // `ImportExpression` is matched by type rather than visitor key: a Babel
+    // core older than 7.23 rejects visitors for node types it doesn't know.
+    enter(p) {
+      checkCallExpressions && isImportExpression(p.node) && (dynamic = true) && p.stop();
+    },
     Function(p) {
       if (t.isObjectMethod(p.node) && p.node.computed) {
         dynamic = isDynamic(p.get("key"), { checkMember, checkTags, checkCallExpressions });
@@ -746,6 +759,18 @@ const templateEscapes = new Map([
   ["\u2029", "\\u2029"]
 ]);
 
+// A NumericLiteral for any evaluated number, so `-1` and `NaN` stay static
+// literals downstream. @babel/types 8's builder rejects negative and
+// non-finite values (`t.valueToNode` builds `-1` / `0 / 0` expressions
+// instead), so those are built as plain nodes; generators print them as
+// `-1` / `NaN` / `Infinity`, as Babel 7's builder did.
+export function numberLiteral(value: number): t.NumericLiteral {
+  if (value >= 0 && Number.isFinite(value) && !Object.is(value, -0)) return t.numericLiteral(value);
+  const node = { type: "NumericLiteral", value } as t.NumericLiteral;
+  if (Object.is(value, -0)) node.extra = { raw: "-0", rawValue: -0 };
+  return node;
+}
+
 export function evaluateAndInline(
   value: EvaluateAndInlineNode | null | undefined,
   valueNode: NodePath<EvaluateAndInlineNode>
@@ -773,7 +798,7 @@ export function evaluateAndInline(
       if (typeof r.value === "string") {
         valueNode.replaceWith(t.stringLiteral(r.value));
       } else if (typeof r.value === "number") {
-        valueNode.replaceWith(t.numericLiteral(r.value));
+        valueNode.replaceWith(numberLiteral(r.value));
       } else if (typeof r.value === "boolean") {
         valueNode.replaceWith(t.booleanLiteral(r.value));
       }

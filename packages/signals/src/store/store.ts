@@ -44,11 +44,13 @@ import {
   REACTIVE_RECOMPUTING_DEPS,
   REACTIVE_STAGED_READ,
   STATUS_ERROR,
-  STATUS_PENDING
+  STATUS_PENDING,
+  STATUS_UNINITIALIZED
 } from "../core/constants.js";
 import {
   captureWriteSnapshot,
   context,
+  devRead,
   disposalDepth,
   isEqual,
   notePromotedWrite,
@@ -63,6 +65,7 @@ import {
   stagedScreen,
   strictRead,
   strictReadActive,
+  tracking,
   untrack,
   untrackDepth,
   verdict
@@ -77,8 +80,9 @@ import {
   warnStrictReadUntracked
 } from "../core/dev.js";
 import { signalHook } from "../core/identities.js";
-import { setSlotUnobserved } from "../core/graph.js";
+import { link, setSlotUnobserved } from "../core/graph.js";
 import { getObserver, getOwner } from "../core/owner.js";
+import { checkForeignRead } from "../core/copies.js";
 import { insertIntoHeap } from "../core/heap.js";
 import {
   dirtyQueue,
@@ -120,6 +124,7 @@ import {
   $TARGET,
   $TRACK,
   writeOverride,
+  installShallowView,
   isRawValue,
   isWrappable,
   markRawIngest,
@@ -505,6 +510,7 @@ const storePark = (t: Transaction): void => {
     const target = foldList[i];
     if (target.k === null && target.pb !== null) holdNode(getContainerNode(target), t);
   }
+  optHooks?.park(t);
 };
 
 function getDeepNode(target: StoreTarget): Signal<number> {
@@ -591,17 +597,26 @@ export function cloneRaw(
     (clone as any)[$OWNER] = t;
     return clone;
   }
-  const descs = Object.getOwnPropertyDescriptors(source);
-  for (const key of Reflect.ownKeys(descs)) {
-    const d = (descs as any)[key];
-    if (key === "length" && Array.isArray(source)) continue;
-    d.configurable = true;
-    if (!d.get && !d.set) d.writable = true;
-    else t.a = true;
+  // A plain array with no accessors and no named keys beyond `length`
+  // (`kc` counts own keys) clones by `slice()`: the descriptor path
+  // allocates one descriptor per element, O(n) per first draft write (10k
+  // rows: ~10 ms per push).
+  let clone: any;
+  if (!t.a && t.kc <= source.length + 1 && Object.getPrototypeOf(source) === Array.prototype)
+    clone = source.slice();
+  else {
+    const descs = Object.getOwnPropertyDescriptors(source);
+    for (const key of Reflect.ownKeys(descs)) {
+      const d = (descs as any)[key];
+      if (key === "length" && Array.isArray(source)) continue;
+      d.configurable = true;
+      if (!d.get && !d.set) d.writable = true;
+      else t.a = true;
+    }
+    clone = Array.isArray(source)
+      ? Object.defineProperties([], descs)
+      : Object.create(Object.getPrototypeOf(source), descs);
   }
-  const clone = Array.isArray(source)
-    ? (Object.defineProperties([], descs) as any)
-    : Object.create(Object.getPrototypeOf(source), descs);
   clone[$OWNER] = t;
   return clone;
 }
@@ -692,8 +707,8 @@ function ensurePB(target: StoreTarget): Record<PropertyKey, any> {
   // An optimistic edit composes on the view the user saw and becomes
   // guesses at the setter's exit: nothing is staged, nothing folds
   // (optimistic.ts).
-  if (userWrite && target.fam?.opt === true && !pendingNotify.has(target))
-    return (target.pb = optHooks!.draft(target));
+  if (optHooks && userWrite && target.fam?.opt === true && !pendingNotify.has(target))
+    return (target.pb = optHooks.draft(target));
   if (pb !== null && !isOwned(pb)) {
     // An adopted object awaiting its fold is the user's: the draft writes a
     // clone of it. The clone is the batch's staging — unless the adoption is
@@ -997,9 +1012,9 @@ function foldTarget(t: StoreTarget, old: Record<PropertyKey, any>): void {
                 else delete (v as any)[key];
               }
           } else {
-            for (const key of Reflect.ownKeys(pb)) copyOwn(v, pb, key);
+            for (const key of Reflect.ownKeys(pb)) if (key !== $OWNER) copyOwn(v, pb, key);
             for (const key of Reflect.ownKeys(old)) {
-              if (!hasOwn.call(pb, key)) delete (v as any)[key];
+              if (key !== $OWNER && !hasOwn.call(pb, key)) delete (v as any)[key];
             }
           }
         } else {
@@ -1057,6 +1072,9 @@ function reportReplacedContainers(
   const keys = writtenKeys ?? Reflect.ownKeys(pb);
   const isArray = Array.isArray(pb);
   const owner = storeRootOwner(t);
+  // Items the array held before the write: an index that now holds one of
+  // them was moved into place (an in-place splice / shift), not replaced.
+  let oldArrayItems: Set<unknown> | null = null;
   for (const key of keys) {
     if ((isArray && key === "length") || key === $OWNER) continue;
     if (t.del?.has(key)) continue;
@@ -1071,6 +1089,13 @@ function reportReplacedContainers(
       targetsEqual(ov, nv)
     )
       continue;
+    if (isArray) {
+      if (oldArrayItems === null) {
+        oldArrayItems = new Set<unknown>();
+        for (const item of old as unknown[]) oldArrayItems.add(unwrapValue(item));
+      }
+      if (oldArrayItems.has(nv)) continue;
+    }
     const isArr = Array.isArray(nv);
     if (isArr !== Array.isArray(ov)) continue;
     let total: number;
@@ -1138,13 +1163,18 @@ function notifyWrites(t: StoreTarget): void {
   // Optimistic channel: a user's writes on an optimistic family become
   // guesses on the nodes (lanes); the draft is discarded, the committed
   // backing never touched.
-  if (userWrite && t.fam?.opt === true) {
-    // The draft is discarded first: the diff reads the target (its nodes
-    // are born from the committed frame, not the draft).
-    t.pb = null;
-    t.wk = null;
-    t.pb = optHooks!.writes(t, pb);
-    return;
+  if (optHooks && t.fam?.opt === true) {
+    if (userWrite) {
+      // The draft is discarded first: the diff reads the target (its nodes
+      // are born from the committed frame, not the draft).
+      t.pb = null;
+      t.wk = null;
+      t.pb = optHooks.writes(t, pb);
+      return;
+    }
+    // The derive's draft: new rows under guessed rows are paired with them
+    // first (D-34, #4329).
+    optHooks.pair(t, pb);
   }
   const old = t.v;
   // Devtools mutation hook: full-key diff (dev-only cost) so unobserved
@@ -1336,7 +1366,10 @@ export function notifyKeyDiff(
   } else {
     const ov = old[key as any];
     const nv = neu[key as any];
-    if (!isEqual(ov, nv) && !targetsEqual(ov, nv))
+    // A live chained `old` (a store proxy, §7b) already reads the inner
+    // store's next frame, not what the node was last told: written, the
+    // node's own equality judging it (#4361).
+    if (old[$TARGET] || (!isEqual(ov, nv) && !targetsEqual(ov, nv)))
       setSignal(node, typeof nv === "function" ? () => nv : (nv as any));
   }
 }
@@ -1372,7 +1405,8 @@ export function notifyKeyValue(
  * unrelated `a.value` stayed stale until the action settled). A real
  * change still writes, and on a held node still proposes. A live chained
  * `old` (a store proxy, §7b) reflects the inner store, not what the node
- * was last told — written unconditionally, as before.
+ * was last told — written unconditionally, as before; its container too
+ * (#4361).
  *
  * The container is told of an arrangement change when it has structural
  * subscribers OR carries an arrangement guess (S4): for a guessed
@@ -1388,17 +1422,18 @@ export function notifyFoldTail(
   neu: Record<PropertyKey, any>
 ): void {
   const has = t.h;
+  const live: StoreTarget | undefined = (old as any)[$TARGET];
   if (has !== null) {
-    const live: StoreTarget | undefined = (old as any)[$TARGET];
     for (const key of Reflect.ownKeys(has))
       if (live || key in old !== key in neu) setSignal(has[key as any], key in neu);
   }
   const k = t.k;
   if (k !== null && (k._subs !== null || k._config & CONFIG_OVERRIDE)) {
     const changed =
-      Array.isArray(neu) && Array.isArray(old)
+      live ||
+      (Array.isArray(neu) && Array.isArray(old)
         ? arrayStructureChanged(old as any[], neu as any[])
-        : membershipChanged(old, neu);
+        : membershipChanged(old, neu));
     if (changed) notifyContainer(k, neu);
   }
 }
@@ -1716,16 +1751,27 @@ function changedBetween(
 
 /** Value of a key with a leaf: core's — `read()` links a tracked reader and,
  * tracked or not, applies the hold and A28 rules a signal's read does. A
- * projection's unheld staging is ahead for a handler (`familyAhead`). */
+ * projection's unheld staging is ahead for a handler (`familyAhead`), and is
+ * the only value while its derive has never committed: the committed side
+ * is the seed, never observable (A25) — a reader core serves the screen (a
+ * verdict reader, #4355) is served the staging, as for a memo born staged
+ * (core `serve`). */
 function nodeValue(node: Signal<any>, backing: any, target: StoreTarget): any {
-  let v = readNode(node);
+  let v;
   if (
     node._pendingValue !== NOT_PENDING &&
     !(node._config & CONFIG_HELD) &&
-    context === null &&
-    target.fam !== null
-  )
+    target.fam !== null &&
+    (context === null || target.fam.node?._statusFlags! & STATUS_UNINITIALIZED)
+  ) {
+    // A pass over a derive that has never committed: the staging is its
+    // first answer, not a change — linked and served with no verdict (a
+    // first landing is loading, not pending: A19 exc. 1, F-9, as for a memo
+    // born staged; core's verdict would call the leaf's staging pending).
+    if (__DEV__) devRead(node); // read()'s dev diagnostics, which this read skips
+    if (context !== null && tracking) link(node, context as Computed<any>);
     v = node._pendingValue;
+  } else v = readNode(node);
   return v === (FORCE as any) ? backing : v;
 }
 
@@ -1822,15 +1868,9 @@ function pullFamily(target: StoreTarget): void {
     // (committed plus the guesses) and does not suspend on the derive; a
     // verdict window still asks it (`isPending` is true while the flight is
     // up). The family's, not the target's: the edit stands in for the one
-    // flight the family has.
-    const overlaid = target.fam!.overlaid;
-    if (
-      verdict === null &&
-      fw._statusFlags & STATUS_PENDING &&
-      overlaid !== undefined &&
-      overlaid.size !== 0
-    )
-      return;
+    // flight the family has — not over a new question they do not answer
+    // (optimistic.ts `stands`, #4336).
+    if (verdict === null && fw._statusFlags & STATUS_PENDING && optHooks?.stands(target)) return;
     readNode(fw);
   } else untrack(() => readNode(fw));
 }
@@ -1884,10 +1924,10 @@ function enumerationSource(target: StoreTarget): Record<PropertyKey, any> {
     // A container's arrangement guess is not a backing: the view composes
     // over the base it is shown over.
     const base = asBacking(readNode(getContainerNode(target)));
-    return target.fam?.opt === true ? optHooks!.view(target, base) : base;
+    return optHooks && target.fam?.opt === true ? optHooks.view(target, base) : base;
   }
   const src = readSource(target);
-  return optRead(target) ? optHooks!.view(target, src) : src;
+  return optHooks && optRead(target) ? optHooks.view(target, src) : src;
 }
 
 /** A read on an optimistic family that composes the lanes' values: not the
@@ -1971,6 +2011,7 @@ function warnWriteOutsideSetter(
 
 const traps: ProxyHandler<StoreTarget> = {
   get(target, key, receiver) {
+    if (__DEV__ && getObserver() === null) checkForeignRead();
     // One typeof gates every brand-symbol compare off the hot string path.
     if (typeof key !== "string") {
       if (key === $TARGET) return target;
@@ -2119,7 +2160,8 @@ const traps: ProxyHandler<StoreTarget> = {
       // Reading a currently-absent own key subscribes to it (R12) — for any
       // target OUTSIDE its own draft scope, even mid-setter (#3037, above).
       if (v === undefined && !inDraft(target)) {
-        if (getObserver() !== null) readNode(getNode(target, key, accProbe));
+        // (`nodeValue` reads — and links — the node it creates.)
+        if (getObserver() !== null) getNode(target, key, accProbe);
         const node = target.n?.[key];
         if (node) {
           const nv = nodeValue(node, undefined, target);
@@ -2161,8 +2203,8 @@ const traps: ProxyHandler<StoreTarget> = {
         node._value = present; // the link follows the inner store (S4)
         if (node._config & CONFIG_OVERRIDE) return !!nv;
         return present;
-      } else if (optRead(target)) {
-        const guessed = optHooks!.has(target, key);
+      } else if (optHooks && optRead(target)) {
+        const guessed = optHooks.has(target, key);
         if (guessed !== undefined) return guessed;
       }
     }
@@ -2203,8 +2245,8 @@ const traps: ProxyHandler<StoreTarget> = {
         return undefined;
     } else src = readSource(target, key, true);
     let desc: PropertyDescriptor | undefined;
-    if (!enumerating && optRead(target)) {
-      const guessed = optHooks!.descriptor(target, key);
+    if (optHooks && !enumerating && optRead(target)) {
+      const guessed = optHooks.descriptor(target, key);
       if (guessed === null) return undefined;
       desc = guessed;
     }
@@ -2408,8 +2450,8 @@ export function storeSetter<T>(proxy: T, fn: (draft: T) => T | void, guard = tru
     // A returned replacement: on an optimistic family a user's is itself an
     // optimistic edit — diffed against the view as guesses (`next` parity);
     // otherwise it is adopted as the incoming truth.
-    if (guard && target.fam?.opt === true && !writeOverride)
-      optHooks!.writes(target, unwrapValue(result));
+    if (optHooks && guard && target.fam?.opt === true && !writeOverride)
+      optHooks.writes(target, unwrapValue(result));
     else adoptPB(target, unwrapValue(result));
   }
   // A34 (3), #3612 — the derived store's twin of `setMemo`: a user write to
@@ -2467,6 +2509,18 @@ export function createStore<T extends Record<PropertyKey, any>>(
   const setter: SetStoreFunction<T> = fn => storeSetter(proxy, fn);
   return [proxy, setter];
 }
+
+/** The list driver's slot view of a shallow store (types.ts `shallowView`):
+ * one `readSource` for the container instead of a trap per slot. A shallow
+ * store's slots hold raw records, so the backing the container read serves
+ * is what each slot read would — except where a slot's own leaf can answer
+ * differently: an optimistic family's guesses, a chained backing, accessor
+ * keys, or a read inside a draft or write scope. Those keep the trap. */
+installShallowView(t => {
+  // Any open write scope keeps the trap (it covers `inDraft`).
+  if (t?.s && !(t.ch || t.a || writeScopes || writeOverride || t.fam?.opt))
+    return (t.fam && pullFamily(t), readSource(t) as any[]);
+});
 
 /** True when `proxy` is a SHALLOW store (children served verbatim, slots
  * replaced by reference — #2932). The list driver uses this to choose the
@@ -2610,7 +2664,7 @@ function snapshotWalk(value: any, seen: Map<object, any>, fam: StoreFamily | nul
       if (t.ovl) materializePB(t);
       backing = t.pb!;
     }
-    if (optRead(t)) backing = optHooks!.view(t, backing);
+    if (optHooks && optRead(t)) backing = optHooks.view(t, backing);
     if (backing === src) break;
     src = backing;
   }

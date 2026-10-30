@@ -17,7 +17,12 @@
  * rules a memo's read follows. No per-leaf back-pointer, nothing in core.
  */
 import { attrHooks } from "../core/attribution-hooks.js";
-import { CONFIG_AUTO_DISPOSE, STATUS_PENDING, STATUS_UNINITIALIZED } from "../core/constants.js";
+import {
+  CONFIG_AUTO_DISPOSE,
+  STATUS_ERROR,
+  STATUS_PENDING,
+  STATUS_UNINITIALIZED
+} from "../core/constants.js";
 import { computed } from "../core/core.js";
 import { NotReadyError } from "../core/error.js";
 import {
@@ -32,6 +37,7 @@ import { getOwner, isDisposed } from "../core/owner.js";
 import { insertSubs, question, schedule, setQuestion } from "../core/scheduler.js";
 import type { Computed, Signal } from "../core/types.js";
 import type { Refreshable } from "../core/index.js";
+import { optHooks } from "./hooks.js";
 import { reconcileState } from "./reconcile.js";
 import { nameStore, runDirect, storeSetter, wrap } from "./store.js";
 import { setLookup, storeOwners, type StoreFamily, type StoreTarget } from "./target.js";
@@ -138,9 +144,16 @@ function cloneState<T extends object>(v: T, shallow: boolean): T {
  * pending derivatively on the derive (its readers hold; it re-runs at the
  * landing). The leaves do not subscribe to the derive, so the family does
  * the walk. */
-function wakeFamily(fam: StoreFamily, error: unknown): void {
+function wakeFamily(fam: StoreFamily): void {
   const fw = fam.node!;
+  // Pending on the derive itself, whatever source took it there (an upstream
+  // memo's flight reaches it as a NotReady of that memo, #4271): the leaves
+  // are not that source's dependents, so only the family's settle — which
+  // retires the derive (`settleFamily`) — reaches the readers parked here. A
+  // reader the landing leaves unchanged does not re-run to clear it (#4305).
+  const error = new NotReadyError(fw);
   fam.woke = true;
+  optHooks?.ask(fam);
   forEachFamilyNode(fam, n => {
     if (n._subs === null) return;
     // The leaf carries the derive's pending as a propagated copy, as a memo
@@ -178,6 +191,18 @@ function settleFamily(fam: StoreFamily): void {
   forEachFamilyNode(fam, n => {
     if (n._subs !== null) settlePendingSource(n as unknown as Computed<any>, fw);
   });
+  // The landing is the derive's change for a reader parked on the derive
+  // itself, whatever status the landing pass began from (an errored derive
+  // re-asked: a reader that met the error has no leaf to learn it from).
+  insertSubs(fw);
+}
+
+/** A source's status reached the derive by propagation (core
+ * `propagateStatus`), its pass not re-run: the family learns it as from the
+ * pass's own throw. */
+function familyStatus(this: StoreFamily, status: number): void {
+  if (status & STATUS_PENDING) wakeFamily(this);
+  else if (status & STATUS_ERROR) errorFamily(this);
 }
 
 function forEachFamilyNode(fam: StoreFamily, fn: (n: Signal<any>) => void): void {
@@ -239,7 +264,7 @@ export function runProjectionComputed<T extends object>(
       draft,
       s => {
         result = fn((shadow ?? s) as T);
-        const commit = (v: void | T) => {
+        const commit = (v: void | T, wake: number = 1) => {
           // Shadow run: commit a detached snapshot, never the shadow itself
           // (adoption takes the value by identity — handing it the live
           // shadow would fuse the draft to the observable store).
@@ -263,8 +288,11 @@ export function runProjectionComputed<T extends object>(
           // A commit is the derive's change for the readers that observed its
           // flight (linked by `pullFamily`; a settled pull does not link), as
           // a memo's landing is for its readers: one that caught the NotReady
-          // (a fallback value, not pending) re-runs too (#4070).
-          insertSubs(owner);
+          // (a fallback value, not pending) re-runs too (#4070). A pass of a
+          // settled derive has none (`wake` 0): a link left is a stale one a
+          // held frame keeps (A30), from a reader that re-ran since. Woken by
+          // every pass, a reader feeding a key the pass peeks at looped (#4342).
+          if (wake) insertSubs(owner);
         };
         const sync = handleAsync(owner, result, commit, (error, pending) => {
           // The flight rejected: the leaves' readers learn it from here —
@@ -274,10 +302,12 @@ export function runProjectionComputed<T extends object>(
           // #2897) — and the flush that runs them advances the clock, so a
           // later tracked re-read may retry (core `read`).
           if (first && owner._statusFlags & STATUS_UNINITIALIZED) return;
-          if (pending) wakeFamily(fam, error);
+          if (pending) wakeFamily(fam);
           else errorFamily(fam);
         });
-        if (!owner._loading) commit(sync as void | T);
+        // (The status is the one before this pass: `recompute` sets it after.)
+        if (!owner._loading)
+          commit(sync as void | T, owner._statusFlags & (STATUS_PENDING | STATUS_ERROR));
       },
       false
     );
@@ -289,7 +319,7 @@ export function runProjectionComputed<T extends object>(
     // they do not subscribe to the derive.
     // A synchronous error the same way (#3956: a rerun that finds the
     // entry failed throws): every live reader re-derives and meets it.
-    if (!first) e instanceof NotReadyError ? wakeFamily(fam, e) : errorFamily(fam);
+    if (!first) e instanceof NotReadyError ? wakeFamily(fam) : errorFamily(fam);
     throw e;
   }
   // A pass that returned with a flight up (an iterator's sync first yield):
@@ -302,7 +332,7 @@ export function runProjectionComputed<T extends object>(
     !owner._loading &&
     !first
   )
-    wakeFamily(fam, owner._x?._error);
+    wakeFamily(fam);
   return owner;
 }
 
@@ -319,6 +349,7 @@ function createProjectionInternal<T extends object = {}>(
     map: new WeakMap(),
     node: null,
     live: new Set(),
+    st: familyStatus,
     shallow: !!options?.shallow,
     // The row key, for a child paired after the adoption (store.ts
     // `adoptChild`, #3712) as the adoption pairs them.
