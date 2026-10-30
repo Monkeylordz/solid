@@ -22,6 +22,7 @@ import {
   createSignal,
   createStore,
   flush,
+  independent,
   isPending,
   latest,
   resetErrorHalt
@@ -379,6 +380,17 @@ export async function runScenario(sc: Scenario, variant: Variant = {}): Promise<
     for (step = 0; step < sc.steps.length; step++) {
       const st = sc.steps[step];
       switch (st.t) {
+        case "independent":
+          guard("throw", () =>
+            independent(() => {
+              for (const write of st.writes) {
+                values[write.s] = write.v;
+                sigs[write.s][1](write.v);
+              }
+              if (variant.remount) remount();
+            })
+          );
+          break;
         case "write":
           values[st.s] = st.v;
           guard("throw", () => {

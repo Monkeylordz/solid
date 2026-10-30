@@ -84,6 +84,27 @@ export function edits(sc: Scenario): Scenario[] {
   sc.steps.forEach((st, i) => {
     if (st.t === "settle" && st.pick > 0)
       out.push({ ...sc, steps: sc.steps.map((x, j) => (j === i ? { ...st, pick: 0 } : x)) });
+    if (st.t === "independent") {
+      st.writes.forEach((_, k) =>
+        out.push({
+          ...sc,
+          steps: sc.steps.map((x, j) =>
+            j === i ? { ...st, writes: st.writes.filter((_, n) => n !== k) } : x
+          )
+        })
+      );
+      st.writes.forEach((w, k) => {
+        if (w.v !== 0)
+          out.push({
+            ...sc,
+            steps: sc.steps.map((x, j) =>
+              j === i
+                ? { ...st, writes: st.writes.map((v, n) => (n === k ? { ...v, v: 0 } : v)) }
+                : x
+            )
+          });
+      });
+    }
   });
   // Tree.
   treeEdits(sc.tree).forEach(tree => out.push({ ...sc, tree }));
@@ -119,7 +140,9 @@ export function edits(sc: Scenario): Scenario[] {
   if (
     last > 0 &&
     !refs.some(r => r.k === "s" && r.i === last) &&
-    !sc.steps.some(s => "s" in s && s.s === last)
+    !sc.steps.some(
+      s => ("s" in s && s.s === last) || (s.t === "independent" && s.writes.some(w => w.s === last))
+    )
   )
     out.push({ ...sc, signals: sc.signals.slice(0, last) });
   sc.signals.forEach(

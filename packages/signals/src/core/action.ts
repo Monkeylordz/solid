@@ -12,6 +12,7 @@ import {
   flush,
   inEffectCallback,
   joinFuture,
+  independentHooks,
   newTransaction,
   nextQuestion,
   question,
@@ -36,6 +37,7 @@ const ACTION_CALLED_IN_OWNED_SCOPE_MESSAGE =
  * — that would park the outer's remaining writes' frame mid-slice; the outer
  * step's own return does. */
 function inTransaction<T>(t: Transaction, q: number, fn: () => T): T {
+  if (independentHooks?._wrap()) return independentHooks._run(t, () => inTransaction(t, q, fn));
   // The slice and its flush ask this action's question (A18 provenance):
   // the guesses it writes and the flights it starts are stamped with it.
   const prevQ = question;

@@ -610,6 +610,17 @@ module.exports = [
     alias
   },
   {
+    name: "signals: + independent groups",
+    path: "../../packages/signals/dist/prod/index.js",
+    import: "{ createSignal, createMemo, createEffect, createRoot, flush, independent }",
+    // The grouping engine is optional: the core-only scenario above must
+    // continue to shed it, including its context and bookkeeping hooks.
+    // Direct node parking, shared context/membership helpers, one write hook,
+    // and compact ownership maps: 23,300 -> 22,874 B minified and
+    // 8,561 -> 8,455 B brotli. Marginal minified cost: 3,392 -> 2,979 B.
+    limit: "8.47 KB"
+  },
+  {
     name: "signals: + createStore",
     path: "../../packages/signals/dist/prod/index.js",
     import: "{ createSignal, createMemo, createEffect, createRoot, flush, createStore }",

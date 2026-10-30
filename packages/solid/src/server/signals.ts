@@ -4736,6 +4736,11 @@ export function untrack<T>(fn: () => T): T {
 
 export function flush() {}
 
+/** Server writes execute immediately; there is no pending render queue. */
+export function independent(fn: () => void): void {
+  fn();
+}
+
 // SSR is pull-based with no scheduler, so there is no halt state to reset.
 export function resetErrorHalt() {}
 

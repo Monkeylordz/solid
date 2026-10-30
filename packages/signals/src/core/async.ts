@@ -39,6 +39,7 @@ import {
   flush,
   globalQueue,
   joinFuture,
+  independentHooks,
   MAINLINE_QUESTION,
   passLane,
   question,
@@ -493,6 +494,7 @@ export function handleAsync<T>(
 
   const handleError = (error: any) => {
     if (el._x?._inFlight !== result) return;
+    if (independentHooks?._wrap()) return independentHooks._run(el, () => handleError(error));
     // NotReadyError from rejected promises should be treated as pending, not error
     let stillPending = error instanceof NotReadyError;
     // Dev-only authorship diagnostic (#2987): no edge means a post-`await`
@@ -551,6 +553,7 @@ export function handleAsync<T>(
     // skip this stale async result — the upcoming flush will recompute the node
     // with the new value, creating a fresh Promise that supersedes this one.
     if (el._flags & REACTIVE_DIRTY) return;
+    if (independentHooks?._wrap()) return independentHooks._run(el, () => asyncWrite(value, then));
     const wasUninitialized = el._statusFlags & STATUS_UNINITIALIZED;
     landStatus(el);
     // Attribution hook: lets the engine snapshot state before the landing
@@ -980,6 +983,7 @@ export function notifyStatus(el: Computed<any>, status: number, error?: any): vo
 export function propagateStatus(el: Computed<any>, status: number, error: any): void {
   const pendingSource = status === STATUS_PENDING && error instanceof NotReadyError && error.source;
   forEachDependent(el, (sub, link) => {
+    independentHooks?._cause(el, sub);
     sub._time = clock;
     // A pending mark on a kept-tail link re-derives the subscriber instead of
     // marking it (A30, #3494 review; fuzzer latest-1 #2141; #3519 review).

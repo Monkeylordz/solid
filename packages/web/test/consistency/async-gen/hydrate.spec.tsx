@@ -24,7 +24,7 @@
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { expect, test } from "vitest";
-import { action, flush, resetErrorHalt } from "solid-js";
+import { action, flush, independent, resetErrorHalt } from "solid-js";
 import { hydrate, render } from "@solidjs/web";
 import { sharedConfig } from "solid-js/internal";
 import type { AppContext } from "../../async-gen/emit.js";
@@ -232,6 +232,16 @@ async function runCase(
     for (step = 0; step < sc.steps.length; step++) {
       const st = sc.steps[step];
       switch (st.t) {
+        case "independent":
+          guard("throw", () =>
+            independent(() => {
+              for (const write of st.writes) {
+                values[write.s] = write.v;
+                S[write.s][1](write.v);
+              }
+            })
+          );
+          break;
         case "write":
           values[st.s] = st.v;
           guard("throw", () => S[st.s][1](st.v));

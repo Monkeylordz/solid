@@ -53,7 +53,7 @@ async function bundleFixture(
   const chunk = result[0].output[0];
   const retained = Object.entries(chunk.modules)
     .filter(([, mod]) => mod.renderedLength > 0)
-    .map(([id]) => id.replace(SRC + "/", ""));
+    .map(([id]) => id.replace(SRC.replaceAll("\\", "/") + "/", ""));
   // Vite lib-mode ES output is not truly minified; match the #2883 harness
   // (esbuild minify + `_`-prefixed property mangling, as the dist build does).
   const minified = await transformWithEsbuild(chunk.code, "out.js", {
@@ -85,6 +85,7 @@ describe("pay-for-use tree-shaking (#2883)", () => {
         "core/verdict.ts",
         "core/lanes.ts",
         "core/action.ts",
+        "independent.ts",
         "core/context.ts"
       ])
     ).toEqual([]);
@@ -503,6 +504,21 @@ describe("pay-for-use tree-shaking (#2883)", () => {
     expect(result).toBe("ok");
   });
 
+  it.each([
+    ["core", "", 3000],
+    ["store", ", createStore", 3100],
+    ["optimistic", ", createOptimistic", 3300]
+  ] as const)("independent keeps its %s import cost compact", async (_, extra, ceiling) => {
+    const core = "createSignal, createMemo, createEffect, createRoot, flush";
+    const plain = await bundleFixture(`export { ${core}${extra} } from "sigsrc";`);
+    const grouped = await bundleFixture(`export { ${core}${extra}, independent } from "sigsrc";`);
+    expect(grouped.retained).toContain("independent.ts");
+    // Marginal bytes: unrelated changes to the core do not spend the grouping
+    // engine's budget. scripts/independent-size.mjs also measures packaged JS
+    // and compression; the shipped Rolldown scenario has its own brotli cap.
+    expect(grouped.minifiedBytes - plain.minifiedBytes).toBeLessThanOrEqual(ceiling);
+  });
+
   it("createOptimistic loads the lane engine; the floor ceiling reflects its absence", async () => {
     const { retained } = await bundleFixture(
       `export { createSignal, createEffect, createRoot, flush, createOptimistic } from "sigsrc";`
@@ -592,7 +608,7 @@ describe("pay-for-use tree-shaking (#2883)", () => {
       }
     })) as Rollup.RollupOutput[];
     const chunk = result[0].output[0];
-    const distRoot = dirname(dist) + "/";
+    const distRoot = dirname(dist).replaceAll("\\", "/") + "/";
     return {
       retained: Object.entries(chunk.modules)
         .filter(([, mod]) => mod.renderedLength > 0)
@@ -602,6 +618,95 @@ describe("pay-for-use tree-shaking (#2883)", () => {
   }
 
   describe.skipIf(!existsSync(DIST))("dist artifact (dist/prod)", () => {
+    const independentFixture = `
+      import { createSignal, createMemo, createRenderEffect, createRoot, flush, independent } from "SPEC";
+      export async function run() {
+        let finish;
+        const pending = new Promise(resolve => { finish = resolve; });
+        const menuLog = [], dataLog = [];
+        let dispose;
+        const { setMenu, setPage } = createRoot(d => {
+          dispose = d;
+          const [menu, setMenu] = createSignal(true);
+          const [page, setPage] = createSignal(0);
+          const data = createMemo(() => page() ? pending : 0);
+          createRenderEffect(menu, value => { menuLog.push(value); });
+          createRenderEffect(data, value => { dataLog.push(value); });
+          return { setMenu, setPage };
+        });
+        flush();
+        setPage(1);
+        independent(() => setMenu(false));
+        flush();
+        const held = [menuLog.slice(), dataLog.slice()];
+        finish(1);
+        for (let i = 0; i < 10; i++) await Promise.resolve();
+        flush();
+        dispose();
+        return { held, menuLog, dataLog };
+      }
+    `;
+    for (const tier of ["prod", "observe"] as const) {
+      const dist = resolve(dirname(DIST), `../${tier}/index.js`);
+      it.skipIf(!existsSync(dist))(
+        `independent survives tree shaking and runs in ${tier}`,
+        async () => {
+          const { retained, bundledCode } = await bundleDistFixture(
+            independentFixture.replace("SPEC", "sigdist"),
+            dist
+          );
+          expect(retained).toContain("independent.js");
+          expect(retainedFrom(retained, ["store/", "core/lanes.js", "core/verdict.js"])).toEqual(
+            []
+          );
+          const url = `data:text/javascript;base64,${Buffer.from(bundledCode).toString("base64")}`;
+          const { run } = await import(/* @vite-ignore */ url);
+          expect(await run()).toEqual({
+            held: [[true, false], [0]],
+            menuLog: [true, false],
+            dataLog: [0, 1]
+          });
+        }
+      );
+      it.skipIf(!existsSync(dist))(
+        `independent retains optimistic ownership in ${tier}`,
+        async () => {
+          const { retained, bundledCode } = await bundleDistFixture(
+            `import { createSignal, createOptimistic, createMemo, createRenderEffect, createRoot, flush, independent } from "sigdist";
+             export async function run() {
+               let finish, dispose;
+               const pending = new Promise(resolve => { finish = resolve; });
+               const values = [];
+               const { setPage, setGuess } = createRoot(d => {
+                 dispose = d;
+                 const [page, setPage] = createSignal(0);
+                 const [guess, setGuess] = createOptimistic(0);
+                 createRenderEffect(createMemo(() => page() ? pending : 0), () => {});
+                 createRenderEffect(guess, value => { values.push(value); });
+                 return { setPage, setGuess };
+               });
+               flush();
+               independent(() => { setPage(1); setGuess(9); });
+               flush();
+               const held = values.slice();
+               finish(1);
+               for (let i = 0; i < 10; i++) await Promise.resolve();
+               flush();
+               dispose();
+               return { held, values };
+             }`,
+            dist
+          );
+          expect(retainedFrom(retained, ["independent.js", "core/lanes.js"])).toEqual([
+            "independent.js",
+            "core/lanes.js"
+          ]);
+          const url = `data:text/javascript;base64,${Buffer.from(bundledCode).toString("base64")}`;
+          const { run } = await import(/* @vite-ignore */ url);
+          expect(await run()).toEqual({ held: [0, 9], values: [0, 9, 0] });
+        }
+      );
+    }
     it("isPending-only fixture retains the same module set as src — packaging adds no coupling", async () => {
       const fixture = `export { createSignal, createEffect, createRoot, flush, isPending, latest } from "SPEC";`;
       const { retained: distRetained } = await bundleDistFixture(
@@ -635,6 +740,7 @@ describe("pay-for-use tree-shaking (#2883)", () => {
           "core/verdict.js",
           "core/lanes.js",
           "core/action.js",
+          "independent.js",
           "core/context.js"
         ])
       ).toEqual([]);

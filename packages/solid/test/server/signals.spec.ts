@@ -24,6 +24,7 @@ import {
   runWithOwner,
   untrack,
   flush,
+  independent,
   isDisposed,
   isPending,
   latest,
@@ -46,6 +47,13 @@ import {
 } from "../../src/server/signals.js";
 
 // === createSignal ===
+test("independent executes synchronously through the server entry", () => {
+  const [value, setValue] = createSignal(0);
+  const result = independent(() => setValue(1));
+  expect(value()).toBe(1);
+  expect(result).toBeUndefined();
+});
+
 describe("Server createSignal", () => {
   test("creates and reads a plain signal", () => {
     const [value] = createSignal(5);

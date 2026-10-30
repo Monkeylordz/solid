@@ -99,6 +99,7 @@ import {
   txOf,
   type Transaction,
   installLaneHooks,
+  independentHooks,
   armGuessing
 } from "./scheduler.js";
 import type { Computed, Signal } from "./types.js";
@@ -185,6 +186,7 @@ export function optimisticWrite<T>(n: Signal<T> | Computed<T>, v: T | ((prev: T)
   const prev = guessedValueOf(n);
   if (typeof v === "function") v = (v as (prev: T) => T)(prev);
   if (n._equals && n._equals(prev, v) && !(n._config & CONFIG_GUESS)) return v;
+  independentHooks?._guess(n);
   pendingGuesses.push(n, v, question || nextQuestion());
   armGuessing();
   guessed = true;
@@ -214,6 +216,11 @@ function applyGuesses(parent: Transaction | null): void {
   let lane: Transaction | null = null;
   for (let i = 0; i < pendingGuesses.length; i += 3) {
     const n = pendingGuesses[i] as Signal<any>;
+    const group = independentHooks?._guessParent(n);
+    if (group !== undefined && group !== parent) {
+      parent = group;
+      lane = null;
+    }
     const v = pendingGuesses[i + 1];
     let changed = true;
     // The frame already holding the slot: a guess over it is a second
@@ -264,6 +271,7 @@ function applyGuesses(parent: Transaction | null): void {
     }
   }
   pendingGuesses.length = 0;
+  independentHooks?._guessParent();
 }
 
 /** The running pass read lane `l`'s work as a derivation: it is `l`'s — or,

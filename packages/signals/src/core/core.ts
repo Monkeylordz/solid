@@ -116,6 +116,7 @@ import {
   holdNode,
   insertSubs,
   joinFuture,
+  independentHooks,
   passLane,
   queuePendingNode,
   schedule,
@@ -165,6 +166,7 @@ import type {
 // nothing re-notified it when the value landed (#3291).
 GlobalQueue._update = el => {
   if ((el as any)._type === EFFECT_TRACKED) {
+    if (independentHooks?._compute(el, false, GlobalQueue._update)) return;
     deleteFromHeap(el, dirtyQueue);
     (el as any)._modified = true;
     globalQueue.enqueue(EFFECT_USER, (el as any)._run);
@@ -327,6 +329,7 @@ export function clearSnapshots(): void {
 }
 
 export function recompute(el: Computed<any>, create: boolean = false): void {
+  if (independentHooks?._compute(el, create, recompute)) return;
   // §12d: any recompute can clean a marked subscriber — invalidate skips.
   bumpNotifyEpoch();
   const isEffect = (el as any)._type;
@@ -1943,6 +1946,7 @@ export function read<T>(el: Signal<T> | Computed<T>): T {
   ) {
     if (c) {
       if (tracking) link(el, c as Computed<any>);
+      if (independentHooks?._read(c as Computed<any>, el)) return el._value as T;
       // L2: a pass that reads something already in the future joins it —
       // the one mechanism behind "a write that reaches the future joins
       // it". Tracked or not (`untrack` is about dependencies, not about
@@ -1998,6 +2002,7 @@ export function read<T>(el: Signal<T> | Computed<T>): T {
           (c as Computed<any>)._flags |= owner._config & CONFIG_VERDICT;
       }
     }
+    committed = !!independentHooks?._read(c as Computed<any>, el);
     // L2, as in the fast block above (tracked or not). A node born into the
     // future (uninitialized) has no committed value: every reader derives
     // from the future there, a render effect included (A29: a stale reader
@@ -2381,6 +2386,7 @@ export function setSignal<T>(el: Signal<T> | Computed<T>, v: T | ((prev: T) => T
     !!((el as Computed<T>)._statusFlags & STATUS_UNINITIALIZED) ||
     !!el._x?._shownError ||
     !isSame(el, currentValue, v);
+  independentHooks?._write(el, valueChanged);
   if (!valueChanged) return v;
 
   // Attribution hook: this committed write is where a re-run chain begins.

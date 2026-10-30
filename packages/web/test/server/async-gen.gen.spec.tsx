@@ -46,7 +46,10 @@ test.skipIf(!ON)(`async-gen: render seed ${SEED}, ${CASES} cases`, { timeout: 0 
   const scenarios = (
     REPLAY
       ? (JSON.parse(readFileSync(REPLAY, "utf8")) as Scenario[])
-      : fc.sample(scenarioArb(), { seed: SEED, numRuns: CASES })
+      : fc.sample(scenarioArb({ independent: !!process.env.ASYNC_GEN_INDEPENDENT }), {
+          seed: SEED,
+          numRuns: CASES
+        })
   ).map(sc => ({ ...sc, owned: true }));
   const cases: { i: number; error?: string }[] = [];
   for (let i = 0; i < scenarios.length; i++) {
