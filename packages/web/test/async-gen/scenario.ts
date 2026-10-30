@@ -36,6 +36,8 @@ export type Node =
 
 export type Step =
   | { t: "write"; s: number; v: number }
+  /** Synchronous writes sharing one atomic group, including repeated slots. */
+  | { t: "independent"; writes: { s: number; v: number }[] }
   /** Settle the `pick % open`-th open flight (oldest first). */
   | { t: "settle"; pick: number }
   /** An action: writes s = v, then yields on a flight the script settles. */
@@ -128,8 +130,8 @@ function treeArb(signals: number, memos: number): fc.Arbitrary<Node> {
   return node;
 }
 
-function stepArb(signals: number): fc.Arbitrary<Step> {
-  return fc.oneof(
+function stepArb(signals: number, independent: boolean): fc.Arbitrary<Step> {
+  const ordinary: fc.Arbitrary<Step> = fc.oneof(
     {
       weight: 4,
       arbitrary: fc.record({
@@ -151,9 +153,24 @@ function stepArb(signals: number): fc.Arbitrary<Step> {
     { weight: 1, arbitrary: fc.constant({ t: "micro" as const }) },
     { weight: 2, arbitrary: fc.constant({ t: "task" as const }) }
   );
+  // Preserve the established seeded baseline unless this cohort is opted in.
+  return independent
+    ? fc.oneof(
+        { weight: 3, arbitrary: ordinary },
+        {
+          weight: 2,
+          arbitrary: fc.record({
+            t: fc.constant("independent" as const),
+            writes: fc.array(fc.record({ s: fc.nat(signals - 1), v: fc.nat(VALUES - 1) }), {
+              maxLength: 4
+            })
+          })
+        }
+      )
+    : ordinary;
 }
 
-export function scenarioArb(): fc.Arbitrary<Scenario> {
+export function scenarioArb(options: { independent?: boolean } = {}): fc.Arbitrary<Scenario> {
   return fc.integer({ min: 1, max: 2 }).chain(ns =>
     fc.integer({ min: 0, max: 3 }).chain(nm =>
       fc.record({
@@ -162,7 +179,7 @@ export function scenarioArb(): fc.Arbitrary<Scenario> {
           MemoDef[]
         >,
         tree: treeArb(ns, nm),
-        steps: fc.array(stepArb(ns), { minLength: 1, maxLength: 12 })
+        steps: fc.array(stepArb(ns, !!options.independent), { minLength: 1, maxLength: 12 })
       })
     )
   );
@@ -204,15 +221,17 @@ export function describeScenario(s: Scenario): string {
     .map(st =>
       st.t === "write"
         ? `s${st.s}=${st.v}`
-        : st.t === "settle"
-          ? `S${st.pick}`
-          : st.t === "action"
-            ? `A(s${st.s}=${st.v})`
-            : st.t === "flush"
-              ? "f"
-              : st.t === "micro"
-                ? "m"
-                : "t"
+        : st.t === "independent"
+          ? `I(${st.writes.map(w => `s${w.s}=${w.v}`).join(",")})`
+          : st.t === "settle"
+            ? `S${st.pick}`
+            : st.t === "action"
+              ? `A(s${st.s}=${st.v})`
+              : st.t === "flush"
+                ? "f"
+                : st.t === "micro"
+                  ? "m"
+                  : "t"
     )
     .join(" ");
   return `${s.owned ? "owned " : ""}[${s.signals.map((v, i) => `s${i}=${v}`).join(" ")}${memos ? " " + memos : ""}] ${describeNode(s.tree)} :: ${steps}`;

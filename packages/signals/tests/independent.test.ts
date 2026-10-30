@@ -1,44 +1,16 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   action,
   createMemo,
   createOptimistic,
   createRenderEffect,
-  createRoot,
   createSignal,
   createStore,
   createTrackedEffect,
   flush,
   independent
 } from "../src/index.js";
-
-const disposers: (() => void)[] = [];
-afterEach(() => {
-  for (const dispose of disposers.splice(0)) dispose();
-  flush();
-});
-function root<T>(fn: () => T): T {
-  return createRoot(dispose => {
-    disposers.push(dispose);
-    return fn();
-  });
-}
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>(r => (resolve = r));
-  return { promise, resolve };
-}
-async function settle() {
-  for (let i = 0; i < 10; i++) await Promise.resolve();
-  flush();
-}
-function render<T>(read: () => T): T[] {
-  const values: T[] = [];
-  createRenderEffect(read, value => {
-    values.push(value);
-  });
-  return values;
-}
+import { deferred, render, root, settle } from "./independent-helpers.js";
 
 describe("independent", () => {
   it("applies a shared render in a surviving old subtree after its inputs commit", async () => {
@@ -125,6 +97,14 @@ describe("independent", () => {
     gate.resolve(1);
     await settle();
     expect(a).toEqual([1, 2]);
+    expect(b).toEqual([0, 1]);
+    expect(selected).toEqual([1]);
+    setB(0);
+    await settle();
+    expect(selected).toEqual([1, 2]);
+    setA(3);
+    await settle();
+    expect(selected).toEqual([1, 2, 3]);
   });
 
   it("updates a displayed old subtree independently of an unrelated hold", async () => {
@@ -284,6 +264,10 @@ describe("independent", () => {
     expect([a, b]).toEqual([[0], [0, 1]]);
     gate.resolve(1);
     await settle();
+    expect([a, b]).toEqual([
+      [0, 1],
+      [0, 1]
+    ]);
   });
 
   it("an independent write can escape an action's open lifetime", async () => {
@@ -309,28 +293,38 @@ describe("independent", () => {
     expect(a).toEqual([0, 2]);
   });
 
-  it("separate held groups sharing one effect reveal in either completion order", async () => {
-    const ga = deferred<number>(),
-      gb = deferred<number>();
-    const { setA, setB, pairs } = root(() => {
-      const [a, setA] = createSignal(0),
-        [b, setB] = createSignal(0);
-      const av = createMemo(() => (a() ? ga.promise : 0));
-      const bv = createMemo(() => (b() ? gb.promise : 0));
-      return { setA, setB, pairs: render(() => `${av()}:${bv()}`) };
-    });
-    flush();
-    independent(() => setA(1));
-    independent(() => setB(1));
-    flush();
-    expect(pairs).toEqual(["0:0"]);
-    ga.resolve(1);
-    await settle();
-    expect(pairs).toEqual(["0:0", "1:0"]);
-    gb.resolve(1);
-    await settle();
-    expect(pairs).toEqual(["0:0", "1:0", "1:1"]);
-  });
+  it.each([
+    [false, false],
+    [false, true],
+    [true, false],
+    [true, true]
+  ])(
+    "shared held renders tolerate invocation order %s and completion order %s",
+    async (reverseStart, reverseFinish) => {
+      const ga = deferred<number>(),
+        gb = deferred<number>();
+      const { setA, setB, pairs } = root(() => {
+        const [a, setA] = createSignal(0),
+          [b, setB] = createSignal(0);
+        const av = createMemo(() => (a() ? ga.promise : 0));
+        const bv = createMemo(() => (b() ? gb.promise : 0));
+        return { setA, setB, pairs: render(() => `${av()}:${bv()}`) };
+      });
+      flush();
+      if (reverseStart) independent(() => setB(1));
+      independent(() => setA(1));
+      if (!reverseStart) independent(() => setB(1));
+      flush();
+      expect(pairs).toEqual(["0:0"]);
+      (reverseFinish ? gb : ga).resolve(1);
+      await settle();
+      const intermediate = reverseFinish ? "0:1" : "1:0";
+      expect(pairs).toEqual(["0:0", intermediate]);
+      (reverseFinish ? ga : gb).resolve(1);
+      await settle();
+      expect(pairs).toEqual(["0:0", intermediate, "1:1"]);
+    }
+  );
 
   it.each([false, true])("separates consumer writes in either callback order (%s)", async first => {
     const gate = deferred<number>();
@@ -535,15 +529,27 @@ describe("independent", () => {
     expect([a, b, c]).toEqual([[0], [0, 1], [0]]);
     gate.resolve(1);
     await settle();
+    expect([a, b, c]).toEqual([
+      [0, 1],
+      [0, 1],
+      [0, 1]
+    ]);
   });
 
   it("keeps separate store backings in their own groups", async () => {
     const gate = deferred<number>();
-    const { setA, setB, a, b } = root(() => {
+    const { setA, setB, a, b, storeA, storeB } = root(() => {
       const [a, setA] = createStore({ value: 0, unread: 0 });
       const [b, setB] = createStore({ value: 0, unread: 0 });
       render(createMemo(() => (a.value ? gate.promise : 0)));
-      return { setA, setB, a: render(() => a.value), b: render(() => b.value) };
+      return {
+        setA,
+        setB,
+        a: render(() => a.value),
+        b: render(() => b.value),
+        storeA: a,
+        storeB: b
+      };
     });
     flush();
     setA(d => {
@@ -558,11 +564,13 @@ describe("independent", () => {
     );
     flush();
     expect([a, b]).toEqual([[0], [0, 1]]);
+    expect([storeA.unread, storeB.unread]).toEqual([0, 1]);
     gate.resolve(1);
     await settle();
     expect([a, b]).toEqual([
       [0, 1],
       [0, 1]
     ]);
+    expect([storeA.unread, storeB.unread]).toEqual([1, 1]);
   });
 });

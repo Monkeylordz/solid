@@ -5,6 +5,7 @@
  *
  *   ASYNC_GEN=1 [ASYNC_GEN_SEED=3289] [ASYNC_GEN_CASES=200]
  *   [ASYNC_GEN_IGNORE=final-screen,console-error] [ASYNC_GEN_MODE=survey|shrink]
+ *   [ASYNC_GEN_INDEPENDENT=1]
  *   npx vitest run test/async-gen
  *
  * ASYNC_GEN_RECORD / ASYNC_GEN_DIFF (survey mode): see differential.ts.
@@ -137,7 +138,7 @@ describe("async-gen", () => {
 
 describe.skipIf(!FUZZ)("async-gen campaign", () => {
   test(`seed ${SEED}, ${CASES} cases, mode ${MODE}`, { timeout: 0 }, async () => {
-    const arb = scenarioArb();
+    const arb = scenarioArb({ independent: !!process.env.ASYNC_GEN_INDEPENDENT });
     if (MODE === "shrink") {
       try {
         await fc.assert(
